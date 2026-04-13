@@ -1,0 +1,23 @@
+{
+  "name": "openclaw-noesis",
+  "version": "1.0.0",
+  "description": "Memory plugin for OpenClaw agents — semantic search, memory management, and cross-session recall",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "tsc"
+  },
+  "keywords": ["openclaw", "memory", "semantic-search", "agent"],
+  "author": "Blasius Patrick",
+  "license": "MIT",
+  "peerDependencies": {
+    "openclaw": ">=2026.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

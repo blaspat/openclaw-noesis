@@ -1,0 +1,29 @@
+{
+  "id": "noesis",
+  "name": "Noesis Memory",
+  "description": "Semantic memory plugin for OpenClaw — cross-session recall, embedding-based search, and memory indexing per agent session",
+  "version": "1.0.0",
+  "kind": "memory",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "embeddingProvider": {
+        "type": "string",
+        "default": "openai"
+      },
+      "embeddingModel": {
+        "type": "string",
+        "default": "text-embedding-3-small"
+      },
+      "topK": {
+        "type": "number",
+        "default": 5
+      },
+      "indexOnLoad": {
+        "type": "boolean",
+        "default": true
+      }
+    }
+  }
+}

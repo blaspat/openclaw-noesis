@@ -1,28 +1,112 @@
 {
   "id": "noesis",
   "name": "Noesis Memory",
-  "description": "Semantic memory plugin for OpenClaw — cross-session recall, embedding-based search, and memory indexing per agent session",
+  "description": "Local-first semantic memory + context engine for OpenClaw. LanceDB + Ollama, no cloud. Hybrid search, cross-agent recall, and proactive context assembly (assemble/ingest hooks). Zero LLM cost.",
   "version": "1.0.0",
   "kind": "memory",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "embeddingProvider": {
+      "lanceDbPath": {
         "type": "string",
-        "default": "openai"
+        "default": "~/.openclaw/noesis/db",
+        "description": "Path to LanceDB storage directory"
+      },
+      "ollamaEndpoint": {
+        "type": "string",
+        "default": "http://localhost:11434",
+        "description": "Ollama API endpoint"
       },
       "embeddingModel": {
         "type": "string",
-        "default": "text-embedding-3-small"
+        "default": "nomic-embed-text",
+        "description": "Ollama embedding model. Options: nomic-embed-text (768d, fast), mxbai-embed-large (1024d, accurate)"
+      },
+      "chunkSize": {
+        "type": "number",
+        "default": 512,
+        "description": "Chunk size in words for text splitting"
+      },
+      "chunkOverlap": {
+        "type": "number",
+        "default": 64,
+        "description": "Overlap in words between consecutive chunks"
       },
       "topK": {
         "type": "number",
-        "default": 5
+        "default": 6,
+        "description": "Default number of search results to return"
       },
-      "indexOnLoad": {
+      "autoMigrate": {
         "type": "boolean",
-        "default": true
+        "default": false,
+        "description": "Auto-import markdown memory files on plugin startup"
+      },
+      "indexQmdSessions": {
+        "type": "boolean",
+        "default": true,
+        "description": "Watch and auto-index QMD session files"
+      },
+      "watchMemoryDirs": {
+        "type": "boolean",
+        "default": false,
+        "description": "Watch agent memory directories for changes and auto-index .md files"
+      },
+      "gitLfsEnabled": {
+        "type": "boolean",
+        "default": false,
+        "description": "Enable Git LFS persistence for LanceDB data"
+      },
+      "gitLfsRepo": {
+        "type": "string",
+        "default": "",
+        "description": "GitHub repo for Git LFS snapshots (e.g. user/noesis-data)"
+      },
+      "annNprobe": {
+        "type": "number",
+        "default": 16,
+        "description": "IVF-PQ index nprobe: number of partitions to search. Higher = more accurate, slower."
+      },
+      "annNumSubvectors": {
+        "type": "number",
+        "default": 96,
+        "description": "IVF-PQ index num_sub_vectors: compression granularity. Should be dim/8 or dim/16."
+      },
+      "defaultTtlDays": {
+        "type": "number",
+        "default": 90,
+        "description": "Default TTL in days for new entries. 0 = never expire. Entries auto-expire after this many days."
+      },
+      "autoCleanup": {
+        "type": "boolean",
+        "default": true,
+        "description": "Automatically delete expired entries on plugin startup."
+      },
+      "cleanupIntervalHours": {
+        "type": "number",
+        "default": 6,
+        "description": "Run TTL cleanup on this interval (hours). 0 = disabled."
+      },
+      "contextEngineEnabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Register Noesis as the active context engine (assemble + ingest hooks). Set plugins.slots.contextEngine=noesis to activate."
+      },
+      "assembleInjectPriority": {
+        "type": "number",
+        "default": 75,
+        "description": "Minimum priority for Assemble hook injection. Entries >= this always enter context on every model run."
+      },
+      "assembleMaxEntries": {
+        "type": "number",
+        "default": 20,
+        "description": "Max entries to inject via Assemble hook."
+      },
+      "assembleMaxAgeDays": {
+        "type": "number",
+        "default": 30,
+        "description": "Max age (days) for Assemble injection. 0 = no limit."
       }
     }
   }

@@ -1,10 +1,9 @@
 /**
- * openclaw-noesis — Semantic memory plugin for OpenClaw
+ * Noesis — Local-first semantic memory plugin for OpenClaw
  *
- * Features:
- * - Semantic search via embeddings + vector store
- * - Cross-session memory recall
- * - Per-agent-session memory indexing
+ * Memory slot: plugins.slots.memory = "noesis"
+ * Stack: LanceDB (vector store) + Ollama (embeddings) + BM25 + MMR
+ * No cloud. No API keys. Fully local.
  */
 declare const _default: {
     id: string;

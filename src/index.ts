@@ -430,15 +430,18 @@ export default definePluginEntry({
           const lines = [
             `Noesis Memory Stats`,
             `─────────────────`,
-            `Total entries: ${stats.totalEntries}`,
-            `Expired (due for cleanup): ${stats.expiredEntries}`,
+            `Total active entries: ${stats.totalEntries}`,
+            `Total archive entries: ${stats.archiveEntries}`,
             `DB path: ${stats.dbPath}`,
             `Embedding model: ${stats.embeddingModel}`,
             `Ollama endpoint: ${stats.ollamaEndpoint}`,
             ``,
-            `By agent: ${JSON.stringify(stats.byAgent, null, 2)}`,
-            `By type: ${JSON.stringify(stats.byMemoryType, null, 2)}`,
-            `By priority: ${JSON.stringify(stats.byPriority, null, 2)}`,
+            `Active — by agent: ${JSON.stringify(stats.byAgent, null, 2)}`,
+            `Active — by type: ${JSON.stringify(stats.byMemoryType, null, 2)}`,
+            `Active — by priority: ${JSON.stringify(stats.byPriority, null, 2)}`,
+            ``,
+            `Archive — by agent: ${JSON.stringify(stats.byAgentArchive, null, 2)}`,
+            `Archive — by type: ${JSON.stringify(stats.byMemoryTypeArchive, null, 2)}`,
           ];
 
           return {

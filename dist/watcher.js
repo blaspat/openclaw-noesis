@@ -1,39 +1,41 @@
-/**
- * Noesis — QMD session file watcher
- *
- * Watches for new/updated QMD session JSONL files and auto-indexes them.
- * QMD session files live at: ~/.openclaw/sessions/<sessionId>.jsonl
- */
 import fs from "fs";
 import path from "path";
 import os from "os";
 import { randomUUID } from "crypto";
 import { watch as chokidarWatch } from "chokidar";
 import { chunkText, contentChecksum } from "./ollama.js";
-const QMD_SESSIONS_PATH = path.join(os.homedir(), ".openclaw", "sessions");
 const DEBOUNCE_MS = 2000;
 /**
  * Start watching QMD session files and indexing them as they're written.
+ * Watches all session file locations:
+ *   - ~/.openclaw/sessions/<sessionId>.jsonl
+ *   - ~/.openclaw/sessions/<agentId>/<sessionId>.jsonl
+ *   - ~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl
+ *   - ~/.openclaw/agents/<agentId>/qmd/sessions/<sessionId>.jsonl
  *
  * Returns a handle with a close() method for cleanup.
  */
 export function startQmdWatcher(db, ollama, config, logger) {
-    // Ensure sessions directory exists
-    if (!fs.existsSync(QMD_SESSIONS_PATH)) {
-        fs.mkdirSync(QMD_SESSIONS_PATH, { recursive: true });
-    }
+    const home = os.homedir();
+    const sessionPatterns = [
+        // Top-level sessions: ~/.openclaw/sessions/<sessionId>.jsonl
+        // and nested: ~/.openclaw/sessions/<agentId>/<sessionId>.jsonl
+        path.join(home, ".openclaw", "sessions", "**", "*.jsonl"),
+        // Agent sessions: ~/.openclaw/agents/<agentId>/sessions/
+        path.join(home, ".openclaw", "agents", "*", "sessions", "*.jsonl"),
+        // Agent QMD sessions: ~/.openclaw/agents/<agentId>/qmd/sessions/
+        path.join(home, ".openclaw", "agents", "*", "qmd", "sessions", "*.jsonl"),
+    ];
     const pending = new Map();
-    const watcher = chokidarWatch(`${QMD_SESSIONS_PATH}/**/*.jsonl`, {
+    const watcher = chokidarWatch(sessionPatterns, {
         persistent: true,
-        ignoreInitial: false, // index existing files on startup
+        ignoreInitial: false,
         awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
     });
     const handleFile = (filePath) => {
-        // Debounce — wait for writes to settle
-        const existing = pending.get(filePath);
-        if (existing)
-            clearTimeout(existing);
-        pending.set(filePath, setTimeout(async () => {
+        if (pending.has(filePath))
+            return;
+        const timer = setTimeout(async () => {
             pending.delete(filePath);
             try {
                 await indexSessionFile(filePath, db, ollama, config, logger);
@@ -41,12 +43,14 @@ export function startQmdWatcher(db, ollama, config, logger) {
             catch (err) {
                 logger?.(`[noesis/watcher] Error indexing ${filePath}: ${err}`);
             }
-        }, DEBOUNCE_MS));
+        }, DEBOUNCE_MS);
+        pending.set(filePath, timer);
     };
     watcher.on("add", handleFile);
     watcher.on("change", handleFile);
     watcher.on("error", (err) => logger?.(`[noesis/watcher] Watcher error: ${err}`));
-    logger?.(`[noesis/watcher] Watching QMD sessions at: ${QMD_SESSIONS_PATH}`);
+    const watchedPaths = sessionPatterns.join(", ");
+    logger?.(`[noesis/watcher] Watching sessions: ${watchedPaths}`);
     return {
         close() {
             watcher.close();
@@ -67,123 +71,174 @@ const AGENTS_PATH = path.join(os.homedir(), ".openclaw", "agents");
 export function startMemoryWatcher(db, ollama, config, logger) {
     if (!fs.existsSync(AGENTS_PATH)) {
         logger?.(`[noesis/memory-watcher] Agents dir not found: ${AGENTS_PATH}`);
-        return;
+        return { close() { } };
     }
-    // Build glob pattern for all agent memory dirs
-    const globPattern = `${AGENTS_PATH}/*/workspace/memory/*.md`;
+    const globPattern = path.join(AGENTS_PATH, "*", "workspace", "memory", "*.md");
     const pending = new Map();
     const watcher = chokidarWatch(globPattern, {
         persistent: true,
-        ignoreInitial: false, // index existing files on startup
-        awaitWriteFinish: { stabilityThreshold: 1000, pollInterval: 100 },
+        ignoreInitial: false,
+        awaitWriteFinish: { stabilityThreshold: 800, pollInterval: 100 },
     });
     const handleFile = (filePath) => {
-        const existing = pending.get(filePath);
-        if (existing)
-            clearTimeout(existing);
-        pending.set(filePath, setTimeout(async () => {
+        if (pending.has(filePath))
+            return;
+        const timer = setTimeout(async () => {
             pending.delete(filePath);
             try {
-                await indexMemoryFile(filePath, db, ollama, config, logger);
+                const indexed = await indexMemoryFile(filePath, db, ollama, config, logger);
+                if (indexed > 0) {
+                    logger?.(`[noesis/memory-watcher] Indexed ${indexed} chunk(s) from ${path.basename(filePath)}`);
+                }
             }
             catch (err) {
                 logger?.(`[noesis/memory-watcher] Error indexing ${filePath}: ${err}`);
             }
-        }, DEBOUNCE_MS));
+        }, DEBOUNCE_MS);
+        pending.set(filePath, timer);
     };
     watcher.on("add", handleFile);
     watcher.on("change", handleFile);
     watcher.on("error", (err) => logger?.(`[noesis/memory-watcher] Watcher error: ${err}`));
     logger?.(`[noesis/memory-watcher] Watching agent memory dirs: ${globPattern}`);
+    return {
+        close() {
+            watcher.close();
+            for (const t of pending.values())
+                clearTimeout(t);
+            pending.clear();
+        },
+    };
+}
+// ─── Memory file indexer ───────────────────────────────────────────────
+/**
+ * Parse agentId from path like: ~/.openclaw/agents/<agentId>/workspace/memory/...
+ */
+function agentIdFromMemoryPath(filePath) {
+    const rel = path.relative(AGENTS_PATH, filePath);
+    const parts = rel.split(path.sep);
+    return parts[0] || "unknown";
 }
 /**
- * Parse a markdown memory file and index its sections.
- *
- * Splits by ## headings, infers memory type per section,
- * chunks, embeds, and upserts to LanceDB.
+ * Infer memory type from markdown heading/content patterns.
+ */
+function inferMemoryType(content) {
+    const lower = content.toLowerCase();
+    if (lower.includes("decided") || lower.includes("decision") || lower.includes("chose to") || lower.includes("going with"))
+        return "decision";
+    if (lower.includes("prefer") || lower.includes("like") || lower.includes("always") || lower.includes("never"))
+        return "preference";
+    if (lower.includes("fact:") || lower.includes("fact-"))
+        return "fact";
+    if (lower.includes("session") || lower.includes("yesterday") || lower.includes("last"))
+        return "context";
+    return "fact";
+}
+/**
+ * Index a markdown memory file.
+ * Parses by ## headings, creates entries per section.
+ * Deduplicates by content checksum per agent.
  */
 async function indexMemoryFile(filePath, db, ollama, config, logger) {
-    // Extract agentId from path: ~/.openclaw/agents/<agentId>/workspace/memory/<file>
-    const relative = path.relative(AGENTS_PATH, filePath);
-    const parts = relative.split(path.sep);
-    const agentId = parts.length >= 4 ? parts[0] : "unknown";
     const raw = fs.readFileSync(filePath, "utf-8");
-    const sections = splitByHeadings(raw);
+    const agentId = agentIdFromMemoryPath(filePath);
+    const now = Date.now();
+    // Split by ## headings
+    const sections = raw.split(/(?=^##\s)/m).filter((s) => s.trim().length > 10);
     if (sections.length === 0)
-        return;
+        return 0;
     const allChunks = [];
     for (const section of sections) {
-        if (!section.trim() || section.trim().length < 20)
+        const lines = section.split("\n");
+        const title = lines[0].replace(/^##\s*/, "").trim();
+        const body = lines.slice(1).join("\n").trim();
+        if (body.length < 20)
             continue;
-        const type = inferMemoryType(section);
-        const chunks = chunkText(section, config.chunkSize, config.chunkOverlap);
+        // Combine title + body as content
+        const fullContent = title ? `${title}. ${body}` : body;
+        const chunks = chunkText(fullContent, config.chunkSize, config.chunkOverlap);
         for (const chunk of chunks) {
-            allChunks.push({ content: section, chunk });
+            allChunks.push({ content: fullContent, chunk });
         }
     }
     if (allChunks.length === 0)
-        return;
+        return 0;
+    // Deduplicate by checksum per agent
+    const seen = new Set();
+    const unique = allChunks.filter(({ content, chunk }) => {
+        const cs = contentChecksum(content, agentId);
+        if (seen.has(cs))
+            return false;
+        seen.add(cs);
+        return true;
+    });
+    if (unique.length === 0)
+        return 0;
     const BATCH = 8;
     let indexed = 0;
-    for (let i = 0; i < allChunks.length; i += BATCH) {
-        const batch = allChunks.slice(i, i + BATCH);
+    for (let i = 0; i < unique.length; i += BATCH) {
+        const batch = unique.slice(i, i + BATCH);
         try {
             const embeddings = await ollama.embedBatch(batch.map((b) => b.chunk));
-            const autoPriorityByType = {
-                decision: 85, preference: 80, context: 60, fact: 30, session: 20,
-            };
             const entries = batch.map((b, j) => ({
                 id: randomUUID(),
                 agentId,
-                sessionId: "memory-dir",
+                sessionId: "memory",
                 content: b.content,
                 chunk: b.chunk,
                 embedding: embeddings[j],
                 memoryType: inferMemoryType(b.content),
-                createdAt: Date.now(),
+                priority: 0,
+                expiresAt: 0,
+                createdAt: now,
                 sourcePath: filePath,
                 checksum: contentChecksum(b.content, agentId),
-                tags: ["memory-dir"],
-                priority: autoPriorityByType[inferMemoryType(b.content)] ?? 30,
+                tags: [],
             }));
-            const n = await db.upsertEntries(entries);
-            indexed += n;
+            const inserted = await db.upsertEntries(entries);
+            indexed += inserted;
         }
         catch (err) {
             logger?.(`[noesis/memory-watcher] Embed batch error for ${filePath}: ${err}`);
         }
     }
-    if (indexed > 0) {
-        logger?.(`[noesis/memory-watcher] Indexed ${indexed} chunk(s) from ${path.basename(filePath)} (agent: ${agentId})`);
-    }
+    return indexed;
 }
-// ─── helpers (duplicated from migrator.ts to avoid circular deps) ──────────────
-function splitByHeadings(text) {
-    const lines = text.split("\n");
-    const sections = [];
-    let current = [];
-    for (const line of lines) {
-        if (line.startsWith("## ") && current.length > 0) {
-            sections.push(current.join("\n").trim());
-            current = [line];
-        }
-        else {
-            current.push(line);
-        }
+// ─── Session file indexer ────────────────────────────────────────────
+/**
+ * Parse agentId and sessionId from a session JSONL path.
+ * Handles all patterns:
+ *   ~/.openclaw/sessions/<sessionId>.jsonl
+ *   ~/.openclaw/sessions/<agentId>/<sessionId>.jsonl
+ *   ~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl
+ *   ~/.openclaw/agents/<agentId>/qmd/sessions/<sessionId>.jsonl
+ */
+function parseSessionPath(filePath) {
+    const home = os.homedir();
+    const rel = filePath.startsWith(home) ? path.relative(home, filePath) : filePath;
+    const parts = rel.split(path.sep).filter(Boolean);
+    // Pattern: agents/<agentId>/qmd/sessions/<sessionId>.jsonl
+    if (parts[0] === "agents" && parts.length >= 5 && parts[3] === "sessions" && parts[2] === "qmd") {
+        return { agentId: parts[1], sessionId: path.basename(parts[4], ".jsonl") };
     }
-    if (current.length > 0)
-        sections.push(current.join("\n").trim());
-    return sections.filter(Boolean);
-}
-function inferMemoryType(content) {
-    const lower = content.toLowerCase();
-    if (/\bdecid|decision|chose|choice\b/.test(lower))
-        return "decision";
-    if (/\bprefer|always|never|style|like to|don't like\b/.test(lower))
-        return "preference";
-    if (/\bsession|today|yesterday|this morning|last night\b/.test(lower))
-        return "context";
-    return "fact";
+    // Pattern: agents/<agentId>/sessions/<sessionId>.jsonl
+    if (parts[0] === "agents" && parts.length >= 4 && parts[2] === "sessions") {
+        return { agentId: parts[1], sessionId: path.basename(parts[3], ".jsonl") };
+    }
+    // Pattern: .openclaw/sessions/<agentId>/<sessionId>.jsonl
+    if (parts[1] === "sessions" && parts.length >= 3 && parts[2] !== "sessions") {
+        const last = parts[parts.length - 1];
+        if (!last.endsWith(".jsonl") && parts.length >= 3) {
+            return { agentId: parts[2], sessionId: path.basename(parts[parts.length - 1], ".jsonl") };
+        }
+        return { agentId: parts[2], sessionId: path.basename(parts[parts.length - 1], ".jsonl") };
+    }
+    // Pattern: .openclaw/sessions/<sessionId>.jsonl (flat)
+    if (parts[1] === "sessions" && parts.length === 2) {
+        return { agentId: "unknown", sessionId: path.basename(parts[1], ".jsonl") };
+    }
+    // Fallback
+    return { agentId: "unknown", sessionId: path.basename(filePath, ".jsonl") };
 }
 /**
  * Parse a QMD JSONL session file and index its messages.
@@ -196,12 +251,7 @@ async function indexSessionFile(filePath, db, ollama, config, logger) {
     const lines = raw.split("\n").filter((l) => l.trim());
     if (lines.length === 0)
         return;
-    // Extract session ID and agent ID from file path
-    // Expected pattern: ~/.openclaw/sessions/<agentId>/<sessionId>.jsonl
-    // or: ~/.openclaw/sessions/<sessionId>.jsonl
-    const parts = path.relative(QMD_SESSIONS_PATH, filePath).split(path.sep);
-    const agentId = parts.length >= 2 ? parts[0] : "unknown";
-    const sessionId = path.basename(filePath, ".jsonl");
+    const { agentId, sessionId } = parseSessionPath(filePath);
     const texts = [];
     for (const line of lines) {
         try {
@@ -252,14 +302,15 @@ async function indexSessionFile(filePath, db, ollama, config, logger) {
                 chunk: b.chunk,
                 embedding: embeddings[j],
                 memoryType: "session",
+                priority: 0,
+                expiresAt: 0,
                 createdAt: Date.now(),
                 sourcePath: filePath,
                 checksum: contentChecksum(b.content, agentId),
                 tags: ["qmd-session"],
-                priority: 20,
             }));
-            const n = await db.upsertEntries(entries);
-            indexed += n;
+            const inserted = await db.upsertEntries(entries);
+            indexed += inserted;
         }
         catch (err) {
             logger?.(`[noesis/watcher] Embed batch error for ${filePath}: ${err}`);

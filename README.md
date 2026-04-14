@@ -197,7 +197,7 @@ Noesis auto-indexes without needing explicit agent calls. Memory flows in throug
 
 **1. Session transcripts (automatic)**
 
-When `indexQmdSessions: true`, a background watcher picks up new QMD session files in `~/.openclaw/sessions/`. Session content is chunked and stored as `memoryType: session` entries under the agent's session ID.
+When `indexQmdSessions: true`, a background watcher picks up new QMD session files across all session locations: `~/.openclaw/sessions/`, `~/.openclaw/agents/<agentId>/sessions/`, and `~/.openclaw/agents/<agentId>/qmd/sessions/`. Session content is chunked and stored as `memoryType: session` entries under the agent's session ID.
 
 **2. Agent memory dirs (automatic)**
 

@@ -149,6 +149,8 @@ def build_schema(dim: int) -> pa.Schema:
         pa.field("sourcePath", pa.string(), nullable=False),
         pa.field("checksum", pa.string(), nullable=False),
         pa.field("tags", pa.list_(pa.string()), nullable=False),
+        pa.field("expiresAt", pa.int64(), nullable=True),
+        pa.field("priority", pa.string(), nullable=True),
     ])
 
 

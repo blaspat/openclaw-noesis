@@ -43,7 +43,7 @@
     "openclaw": ">=2026.4.0"
   },
   "dependencies": {
-    "@lancedb/lancedb": "^0.27.0",
+    "@lancedb/lancedb": "^0.28.0-beta.5",
     "@sinclair/typebox": "^0.34.0",
     "apache-arrow": "^18.0.0",
     "chokidar": "^5.0.0",

@@ -132,6 +132,7 @@ export class NoesisDB {
             checksum: e.checksum,
             priority: e.priority ?? 0,
             expiresAt: e.expiresAt ?? 0,
+            tags: Array.isArray(e.tags) ? e.tags.map(String) : [],
         }));
         await tbl.add(rows);
         return newEntries.length;

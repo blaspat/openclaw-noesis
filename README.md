@@ -110,8 +110,7 @@ Or edit your OpenClaw config:
       }
     },
     "slots": {
-      "memory": "noesis",
-      "contextEngine": "noesis"
+      "memory": "noesis"
     }
   }
 }

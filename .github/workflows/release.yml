@@ -15,7 +15,6 @@ env:
 
 jobs:
   release:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
     steps:
@@ -31,50 +30,23 @@ jobs:
           registry-url: ${{ env.REGISTRY_URL }}
           cache: "npm"
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install and Build
+        run: npm ci && npm run build
 
-      - name: Install GitHub CLI
-        run: |
-          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-          chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          apt update
-          apt install gh -y
-
-      - name: Define version for this release
+      - name: Get version
         id: version
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          echo "TAG=v$VERSION" >> $GITHUB_OUTPUT
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Build
-        run: npm run build
+          echo "TAG=v$VERSION" >> $GITHUB_OUTPUT
 
       - name: Publish to npm
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ""
 
-      - name: Create tag for this release
-        run: gh tag create ${{ steps.version.outputs.TAG }} --target ${{ github.sha }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ steps.version.outputs.TAG }}
+          tag_name: v${{ steps.version.outputs.VERSION }}
           generate_release_notes: true
-
-      - name: Bump version for next development cycle
-        run: |
-          node scripts/bump-version.js
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json openclaw.plugin.json
-          git commit -m "chore: bump version for next development cycle"
-          git push origin main
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -2,8 +2,8 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "v*"
 
 permissions:
   contents: write
@@ -14,112 +14,14 @@ env:
   REGISTRY_URL: "https://registry.npmjs.org"
 
 jobs:
-  bump:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    outputs:
-      new_version: ${{ steps.bump.outputs.NEW_VERSION }}
-      commit_sha: ${{ steps.bump.outputs.COMMIT_SHA }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Bump version and create verified commit via GitHub API
-        id: bump
-        run: |
-          node scripts/bump-version.js
-          VERSION=$(node -p "require('./package.json').version")
-          echo "NEW_VERSION=$VERSION" >> $GITHUB_OUTPUT
-
-          COMMIT_SHA=$(node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            const plugin = JSON.parse(fs.readFileSync('openclaw.plugin.json', 'utf8'));
-            const token = process.env.GITHUB_TOKEN;
-            const owner = '${{ github.repository_owner }}';
-            const repo = '${{ github.event.repository.name }}';
-            const branch = 'main';
-            const message = 'chore: bump version to v' + process.argv[1];
-            async function run() {
-              const base = 'https://api.github.com/repos/' + owner + '/' + repo;
-              // Get current branch SHA
-              const refRes = await fetch(base + '/git/ref/heads/' + branch, {
-                headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json' }
-              });
-              const refData = await refRes.json();
-              const currentSha = refData.object.sha;
-              // Create blobs
-              const createBlob = (content) => fetch(base + '/git/blobs', {
-                method: 'POST',
-                headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', Accept: 'application/vnd.github+json' },
-                body: JSON.stringify({ content, encoding: 'utf-8' })
-              }).then(r => r.json());
-              const [blobPkg, blobPlugin] = await Promise.all([
-                createBlob(fs.readFileSync('package.json', 'utf8')),
-                createBlob(fs.readFileSync('openclaw.plugin.json', 'utf8'))
-              ]);
-              // Create tree
-              const treeRes = await fetch(base + '/git/trees', {
-                method: 'POST',
-                headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', Accept: 'application/vnd.github+json' },
-                body: JSON.stringify({
-                  tree: [
-                    { path: 'package.json', mode: '100644', type: 'blob', sha: blobPkg.sha },
-                    { path: 'openclaw.plugin.json', mode: '100644', type: 'blob', sha: blobPlugin.sha }
-                  ],
-                  base_tree: currentSha
-                })
-              });
-              const treeData = await treeRes.json();
-              // Create commit
-              const commitRes = await fetch(base + '/git/commits', {
-                method: 'POST',
-                headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', Accept: 'application/vnd.github+json' },
-                body: JSON.stringify({
-                  message,
-                  tree: treeData.sha,
-                  parents: [currentSha],
-                  author: { name: 'github-actions[bot]', email: 'github-actions[bot]@users.noreply.github.com' }
-                })
-              });
-              const commitData = await commitRes.json();
-              // Update branch ref
-              await fetch(base + '/git/refs/heads/' + branch, {
-                method: 'PATCH',
-                headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', Accept: 'application/vnd.github+json' },
-                body: JSON.stringify({ sha: commitData.sha, force: true })
-              });
-              console.log(commitData.sha);
-            }
-            run().catch(e => { console.error(e); process.exit(1); });
-          " "$VERSION")
-          echo "COMMIT_SHA=$COMMIT_SHA" >> $GITHUB_OUTPUT
-
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  publish:
-    needs: bump
+  release:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout at bumped commit
+      - name: Checkout at tag
         uses: actions/checkout@v6
         with:
-          ref: ${{ needs.bump.outputs.commit_sha }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.ref }}
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -131,26 +33,30 @@ jobs:
       - name: Install and Build
         run: npm ci && npm run build
 
+      - name: Bump version for next release
+        run: |
+          node scripts/bump-version.js
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json openclaw.plugin.json
+          git commit -m "chore: prepare for next development cycle"
+          git push origin main
+
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Publish to npm
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ""
 
-  release:
-    needs: [bump, publish]
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
-
-    steps:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: v${{ needs.bump.outputs.NEW_VERSION }}
+          tag_name: ${{ github.ref }}
           generate_release_notes: true
           body: |
-            ## Release v${{ needs.bump.outputs.NEW_VERSION }}
+            ## Release ${{ github.ref }}
 
-            Auto-generated release from push to `main`.
-            Commit: ${{ needs.bump.outputs.commit_sha }}
+            Published to npm.
+            Commit: ${{ github.sha }}

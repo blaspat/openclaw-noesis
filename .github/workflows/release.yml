@@ -10,12 +10,13 @@ permissions:
   id-token: write
 
 jobs:
-  # ── Step 1: Bump version + tag ───────────────────────────────────────────
+  # ── Step 1: Bump version + commit (no tag yet) ──────────────────────────────
   bump:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       new_version: ${{ steps.bump.outputs.NEW_VERSION }}
+      commit_sha: ${{ github.sha }}
 
     steps:
       - uses: actions/checkout@v6
@@ -33,21 +34,19 @@ jobs:
           echo "NEW_VERSION=$VERSION" >> $GITHUB_OUTPUT
           git add package.json openclaw.plugin.json
           git commit -m "chore: bump version to v$VERSION"
-          git tag "v$VERSION"
-          git push origin main --tags
+          git push origin main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── Step 2: Publish to npm (triggered by the tag we just pushed) ───────────
+  # ── Step 2: Publish to npm on the bumped commit ─────────────────────────────
   publish:
     needs: bump
     runs-on: ubuntu-latest
-    # Wait for the tag to be available — run on the tag ref
-    if: contains(github.ref, 'refs/tags/v')
+
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ needs.bump.outputs.commit_sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -64,9 +63,13 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v3
+  # ── Step 3: Create GitHub Release (handles tagging automatically) ──────────
+  release:
+    needs: [bump, publish]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.ref }}
+          tag_name: v${{ needs.bump.outputs.NEW_VERSION }}
           generate_release_notes: true

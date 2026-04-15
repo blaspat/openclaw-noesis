@@ -340,8 +340,8 @@ async function indexSessionFile(
         text = entry.text;
       }
 
-      if (text.trim().length > 20) {
-        texts.push(text.trim());
+      if (text.trim().replace(/[\n\t\r]+/g, ' ').length > 20) {
+        texts.push(text.trim().replace(/[\n\t\r]+/g, ' '));
       }
     } catch {
       // skip malformed lines

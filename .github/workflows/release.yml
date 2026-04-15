@@ -25,6 +25,8 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+          scope: '@blaspat'
+          cache: 'npm'
 
       - name: Install & Build
         run: npm ci && npm run build

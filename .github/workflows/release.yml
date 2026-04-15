@@ -21,11 +21,10 @@ jobs:
         run: echo "TAG=v$(date +%Y.%m.%d)-$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_ENV
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
-          scope: '@blaspat'
           cache: 'npm'
 
       - name: Install & Build

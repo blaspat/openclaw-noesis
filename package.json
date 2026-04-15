@@ -17,7 +17,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "prepublishOnly": "node scripts/sync-version.js && tsc"
+    "bump": "node scripts/bump-version.js"
   },
   "keywords": [
     "openclaw",
@@ -51,6 +51,6 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "typescript": "^5.5.0"
+    "typescript": "^5.9.3"
   }
 }

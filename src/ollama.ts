@@ -138,14 +138,23 @@ export function createOllamaClient(endpoint: string, model: string): OllamaClien
   }
 
   async function embedBatch(texts: string[]): Promise<number[][]> {
-    // Ollama doesn't have native batch; parallelize with concurrency cap
+    // Ollama doesn't have native batch; parallelize with concurrency cap.
+    // Individual failures are tolerated — failed items get a zero-vector placeholder
+    // so the batch can continue rather than propagate the error upward.
     const CONCURRENCY = 4;
     const results: number[][] = new Array(texts.length);
     for (let i = 0; i < texts.length; i += CONCURRENCY) {
       const batch = texts.slice(i, i + CONCURRENCY);
-      const embeddings = await Promise.all(batch.map((t) => embed(t)));
-      for (let j = 0; j < embeddings.length; j++) {
-        results[i + j] = embeddings[j];
+      const batchResults = await Promise.allSettled(batch.map((t) => embed(t)));
+      for (let j = 0; j < batchResults.length; j++) {
+        const result = batchResults[j];
+        if (result.status === "fulfilled") {
+          results[i + j] = result.value;
+        } else {
+          // Embed failed — use zero vector as placeholder; caller can detect
+          const dim = model.includes("mxbai") ? 1024 : 768;
+          results[i + j] = new Array(dim).fill(0);
+        }
       }
     }
     return results;

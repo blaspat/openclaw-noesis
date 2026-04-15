@@ -1,42 +1,106 @@
 name: Release
 
 on:
-  pull_request:
-    types: [closed]
+  push:
     branches:
       - main
 
 permissions:
-  id-token: write
   contents: write
+  id-token: write
+
+env:
+  NODE_VERSION: "24"
+  REGISTRY_URL: "https://registry.npmjs.org"
 
 jobs:
-  publish:
-    if: github.event.pull_request.merged == true
+  # ── Step 1: Bump version + create verified commit via GitHub API ────────────
+  bump:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
+    outputs:
+      new_version: ${{ steps.bump.outputs.NEW_VERSION }}
+      commit_sha: ${{ steps.bump.outputs.COMMIT_SHA }}
 
-      - name: Get tag version
-        run: echo 'TAG=v'$(node -p "require('./package.json').version") >> $GITHUB_ENV
+    steps:
+      - name: Checkout (fetch-depth: 0 for ref access)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
-          cache: 'npm'
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Bump version and create GitHub API commit
+        id: bump
+        run: |
+          node scripts/bump-version.js
+          VERSION=$(node -p "require('./package.json').version")
+          echo "NEW_VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+          # Create commit via GitHub REST API — shows as "Verified" automatically
+          node scripts/github-commit.js \
+            "${{ github.repository_owner }}" \
+            "${{ github.event.repository.name }}" \
+            "main" \
+            "chore: bump version to v$VERSION"
+
+          # Extract commit SHA from the script output
+          COMMIT_SHA=$(gh api repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/git/refs/heads/main --jq .object.sha)
+          echo "COMMIT_SHA=$COMMIT_SHA" >> $GITHUB_OUTPUT
+
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Step 2: Publish to npm on the bumped commit ─────────────────────────────
+  publish:
+    needs: bump
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout at bumped commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.bump.outputs.commit_sha }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: ${{ env.REGISTRY_URL }}
+          cache: "npm"
 
       - name: Install & Build
         run: npm ci && npm run build
 
-      - name: Publish
-        run: NODE_AUTH_TOKEN="" npm publish
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+  # ── Step 3: Create GitHub Release + auto-tag ──────────────────────────────
+  release:
+    needs: [bump, publish]
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ env.TAG }}
+          tag_name: v${{ needs.bump.outputs.NEW_VERSION }}
           generate_release_notes: true
+          body: |
+            ## Release v${{ needs.bump.outputs.NEW_VERSION }}
+
+            Auto-generated release from push to `main`.
+            Commit: ${{ needs.bump.outputs.commit_sha }}

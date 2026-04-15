@@ -77,7 +77,7 @@ export const DEFAULT_CONFIG: NoesisConfig = {
   topK: 6,
   autoMigrate: false,
   indexQmdSessions: true,
-  watchMemoryDirs: true,
+  watchMemoryDirs: false,
   gitLfsEnabled: false,
   gitLfsRepo: "<username>/openclaw-noesis-data",
   annNprobe: 16,

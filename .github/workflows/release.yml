@@ -36,7 +36,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub Release
-        uses: softprops/release-gh-action@v2
+        uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ env.TAG }}
         env:

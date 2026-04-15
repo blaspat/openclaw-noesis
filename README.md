@@ -76,10 +76,7 @@ QMD covers the basics well. Noesis builds on it with features for more structure
 ### 1. Install the plugin
 
 ```bash
-# Via npm (if published as `@blaspat/openclaw-noesis`)
-npm install @blaspat/openclaw-noesis
-
-# Or via ClawHub
+# Via ClawHub
 openclaw plugins install clawhub:@blaspat/openclaw-noesis
 ```
 
@@ -102,7 +99,7 @@ Or edit your OpenClaw config:
           "embeddingModel": "nomic-embed-text",
           "topK": 6,
           "indexQmdSessions": true,
-          "watchMemoryDirs": false,
+          "watchMemoryDirs": true,
           "defaultTtlDays": 90,
           "autoCleanup": true,
           "cleanupIntervalHours": 6
@@ -269,7 +266,7 @@ Both `memories` and `memories_archive` tables get IVF-PQ ANN indexes when they r
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | string | UUID v4 |
-| `agentId` | string | "claire", "luna", etc. |
+| `agentId` | string | "main", "agent007", etc. |
 | `sessionId` | string | OpenClaw session ID |
 | `content` | string | Full original text (lossless) |
 | `chunk` | string | Embedded chunk (for reference) |
@@ -324,7 +321,7 @@ python3 scripts/import_memory.py --agent <agentId> --chunk-size 256 --model mxba
 | `topK` | `6` | Default search result count |
 | `autoMigrate` | `false` | Auto-import markdown files on startup |
 | `indexQmdSessions` | `true` | Watch + auto-index QMD sessions |
-| `watchMemoryDirs` | `false` | Watch agent memory dirs for changes and auto-index .md files |
+| `watchMemoryDirs` | `true` | Watch agent memory dirs for changes and auto-index .md files |
 | `defaultTtlDays` | `90` | Default TTL in days for new entries. `0` = never expire. |
 | `autoCleanup` | `true` | On startup, move expired entries to archive. |
 | `cleanupIntervalHours` | `6` | Run TTL cleanup on this interval (hours). `0` = disabled. |
@@ -333,7 +330,7 @@ python3 scripts/import_memory.py --agent <agentId> --chunk-size 256 --model mxba
 | `assembleMaxEntries` | `20` | Max entries to inject via Assemble hook. |
 | `assembleMaxAgeDays` | `30` | Max age (days) for Assemble injection. `0` = no limit. |
 | `gitLfsEnabled` | `false` | Enable Git LFS persistence for LanceDB backups |
-| `gitLfsRepo` | `blaspat/openclaw-noesis-data` | GitHub repo for Git LFS snapshots |
+| `gitLfsRepo` | `<username>/openclaw-noesis-data` | GitHub repo for Git LFS snapshots |
 | `annNprobe` | `16` | IVF-PQ search probes (higher = more accurate, slower) |
 | `annNumSubvectors` | `96` | IVF-PQ compression granularity |
 

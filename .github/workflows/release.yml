@@ -25,7 +25,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
           cache: 'npm'
 
@@ -33,7 +33,7 @@ jobs:
         run: npm ci && npm run build
 
       - name: Publish
-        run: NODE_AUTH_TOKEN="" npm publish
+        run: NODE_AUTH_TOKEN="" npm publish --verbose
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1

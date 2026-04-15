@@ -155,7 +155,8 @@ def build_schema(dim: int) -> pa.Schema:
 
 
 def open_or_create_table(conn, dim: int):
-    if "memories" in conn.list_tables():
+    tables = conn.list_tables()
+    if "memories" in tables:
         return conn.open_table("memories")
     schema = build_schema(dim)
     return conn.create_table("memories", schema=schema)
@@ -190,6 +191,8 @@ def upsert_entries(table, entries: list[dict], schema: pa.Schema) -> int:
         "embedding": [np.array(e["embedding"], dtype=np.float32) for e in new_entries],
         "memoryType": [e["memoryType"] for e in new_entries],
         "createdAt": [int(e["createdAt"]) for e in new_entries],
+        "expiresAt": [int(e.get("expiresAt", 0)) for e in new_entries],
+        "priority": [e.get("priority", "") for e in new_entries],
         "sourcePath": [e["sourcePath"] for e in new_entries],
         "checksum": [e["checksum"] for e in new_entries],
         "tags": [[] for _ in new_entries],

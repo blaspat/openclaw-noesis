@@ -24,11 +24,17 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Import GPG key
+        if: env.GPG_PRIVATE_KEY
+        run: echo "$GPG_PRIVATE_KEY" | gpg --batch --import --yes
+
       - name: Bump version
         id: bump
         run: |
-          git config user.name "${{ github.actor }}" || true
-          git config user.email "${{ github.actor }}@users.noreply.github.com" || true
+          git config --global commit.gpgsign true
+          git config --global user.signingkey "$GPG_KEY_ID"
+          git config --global user.name "${{ github.actor }}"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
           node scripts/bump-version.js
           VERSION=$(node -p "require('./package.json').version")
           echo "NEW_VERSION=$VERSION" >> $GITHUB_OUTPUT
@@ -36,6 +42,8 @@ jobs:
           git commit -m "chore: bump version to v$VERSION"
           git push origin main
         env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ── Step 2: Publish to npm on the bumped commit ─────────────────────────────

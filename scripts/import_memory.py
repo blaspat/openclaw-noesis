@@ -155,7 +155,7 @@ def build_schema(dim: int) -> pa.Schema:
 
 
 def open_or_create_table(conn, dim: int):
-    tables = conn.list_tables()
+    tables = conn.list_tables().tables
     if "memories" in tables:
         return conn.open_table("memories")
     schema = build_schema(dim)

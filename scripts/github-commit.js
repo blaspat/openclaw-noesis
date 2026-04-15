@@ -14,46 +14,73 @@ if (!owner || !repo || !branch || !message) {
   process.exit(1);
 }
 
-function ghApiJson(method, path, body) {
-  const bodyStr = JSON.stringify(body);
-  const encoded = Buffer.from(bodyStr).toString("base64");
-  const cmd = `gh api -X ${method} ${path} -f input='${encoded}'`;
-  return JSON.parse(execSync(cmd, { encoding: "utf8" }));
+const token = process.env.GH_TOKEN;
+if (!token) {
+  console.error("GH_TOKEN environment variable is required");
+  process.exit(1);
 }
 
-function ghApiSha(method, path, body) {
-  return ghApiJson(method, path, body).sha;
+const repoPath = `repos/${owner}/${repo}`;
+
+function ghJson(method, path, body) {
+  const bodyStr = JSON.stringify(body);
+  const inputFile = `/tmp/gh-input-${Date.now()}.json`;
+  fs.writeFileSync(inputFile, bodyStr);
+  try {
+    const out = execSync(
+      `gh api -X ${method} ${path} --input ${inputFile}`,
+      {
+        encoding: "utf8",
+        env: { ...process.env, GH_TOKEN: token },
+      }
+    ).trim();
+    return JSON.parse(out);
+  } finally {
+    try { fs.unlinkSync(inputFile); } catch {}
+  }
 }
 
 try {
-  const currentSha = ghApiJson("GET", `repos/${owner}/${repo}/git/refs/heads/${branch}`).object.sha;
+  // 1. Get current branch SHA
+  const refData = ghJson("GET", `${repoPath}/git/ref/heads/${branch}`, null);
+  const currentSha = refData.object.sha;
 
-  const files = [
-    { path: "package.json", content: fs.readFileSync(join(root, "package.json"), "utf8") },
-    { path: "openclaw.plugin.json", content: fs.readFileSync(join(root, "openclaw.plugin.json"), "utf8") },
-  ];
+  // 2. Read the bumped files
+  const packageJson = fs.readFileSync(join(root, "package.json"), "utf8");
+  const pluginJson = fs.readFileSync(join(root, "openclaw.plugin.json"), "utf8");
 
-  const blobs = files.map((f) => {
-    const sha = ghApiSha("POST", `repos/${owner}/${repo}/git/blobs`, {
-      content: fs.readFileSync(join(root, f.path), "utf8"),
-      encoding: "text",
-    });
-    return { path: f.path, sha };
+  // 3. Create blobs (need separate calls, --input doesn't work for parallel)
+  const blobPkg = ghJson("POST", `${repoPath}/git/blobs`, {
+    content: packageJson,
+    encoding: "utf-8",
+  });
+  const blobPlugin = ghJson("POST", `${repoPath}/git/blobs`, {
+    content: pluginJson,
+    encoding: "utf-8",
   });
 
-  const treeSha = ghApiSha("POST", `repos/${owner}/${repo}/git/trees`, {
-    tree: blobs.map((b) => ({ path: b.path, mode: "100644", type: "blob", sha: b.sha })),
+  // 4. Create tree
+  const treeSha = ghJson("POST", `${repoPath}/git/trees`, {
+    tree: [
+      { path: "package.json", mode: "100644", type: "blob", sha: blobPkg.sha },
+      { path: "openclaw.plugin.json", mode: "100644", type: "blob", sha: blobPlugin.sha },
+    ],
     base_tree: currentSha,
-  });
+  }).sha;
 
-  const commitResponse = ghApiJson("POST", `repos/${owner}/${repo}/git/commits`, {
+  // 5. Create commit
+  const commitResponse = ghJson("POST", `${repoPath}/git/commits`, {
     message,
     tree: treeSha,
     parents: [currentSha],
-    author: { name: "github-actions[bot]", email: "github-actions[bot]@users.noreply.github.com" },
+    author: {
+      name: "github-actions[bot]",
+      email: "github-actions[bot]@users.noreply.github.com",
+    },
   });
 
-  ghApiJson("PATCH", `repos/${owner}/${repo}/git/refs/heads/${branch}`, {
+  // 6. Update branch ref
+  ghJson("PATCH", `${repoPath}/git/refs/heads/${branch}`, {
     sha: commitResponse.sha,
     force: true,
   });

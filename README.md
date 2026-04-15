@@ -102,7 +102,7 @@ Or edit your OpenClaw config:
           "embeddingModel": "nomic-embed-text",
           "topK": 6,
           "indexQmdSessions": true,
-          "watchMemoryDirs": false,
+          "watchMemoryDirs": true,
           "defaultTtlDays": 90,
           "autoCleanup": true,
           "cleanupIntervalHours": 6
@@ -324,7 +324,7 @@ python3 scripts/import_memory.py --agent <agentId> --chunk-size 256 --model mxba
 | `topK` | `6` | Default search result count |
 | `autoMigrate` | `false` | Auto-import markdown files on startup |
 | `indexQmdSessions` | `true` | Watch + auto-index QMD sessions |
-| `watchMemoryDirs` | `false` | Watch agent memory dirs for changes and auto-index .md files |
+| `watchMemoryDirs` | `true` | Watch agent memory dirs for changes and auto-index .md files |
 | `defaultTtlDays` | `90` | Default TTL in days for new entries. `0` = never expire. |
 | `autoCleanup` | `true` | On startup, move expired entries to archive. |
 | `cleanupIntervalHours` | `6` | Run TTL cleanup on this interval (hours). `0` = disabled. |

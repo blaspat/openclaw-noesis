@@ -33,7 +33,7 @@ jobs:
         run: npm ci && npm run build
 
       - name: Publish
-        run: npm publish
+        run: NODE_AUTH_TOKEN="" npm publish
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1

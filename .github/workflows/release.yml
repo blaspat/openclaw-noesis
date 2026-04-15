@@ -9,43 +9,54 @@ permissions:
   contents: write
   id-token: write
 
+env:
+  NODE_VERSION: "24"
+  REGISTRY_URL: "https://registry.npmjs.org"
+
 jobs:
-  # ── Step 1: Bump version + commit (no tag yet) ──────────────────────────────
+  # ── Step 1: Bump version + create verified commit via GitHub API ────────────
   bump:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       new_version: ${{ steps.bump.outputs.NEW_VERSION }}
-      commit_sha: ${{ github.sha }}
+      commit_sha: ${{ steps.bump.outputs.COMMIT_SHA }}
 
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout (fetch-depth: 0 for ref access)
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Import GPG key
-        if: env.GPG_PRIVATE_KEY
-        run: echo "$GPG_PRIVATE_KEY" | gpg --batch --import --yes
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
 
-      - name: Bump version
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Bump version and create GitHub API commit
         id: bump
         run: |
-          git config --global commit.gpgsign true
-          git config --global user.signingkey "$GPG_KEY_ID"
-          git config --global user.name "${{ github.actor }}"
-          git config --global user.email "$GPG_USER_EMAIL"
           node scripts/bump-version.js
           VERSION=$(node -p "require('./package.json').version")
           echo "NEW_VERSION=$VERSION" >> $GITHUB_OUTPUT
-          git add package.json openclaw.plugin.json
-          git commit -m "chore: bump version to v$VERSION"
-          git push origin main
+
+          # Create commit via GitHub REST API — shows as "Verified" automatically
+          node scripts/github-commit.js \
+            "${{ github.repository_owner }}" \
+            "${{ github.event.repository.name }}" \
+            "main" \
+            "chore: bump version to v$VERSION"
+
+          # Extract commit SHA from the script output
+          COMMIT_SHA=$(gh api repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/git/refs/heads/main --jq .object.sha)
+          echo "COMMIT_SHA=$COMMIT_SHA" >> $GITHUB_OUTPUT
+
         env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
-          GPG_USER_EMAIL: ${{ secrets.GPG_USER_EMAIL }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ── Step 2: Publish to npm on the bumped commit ─────────────────────────────
   publish:
@@ -53,32 +64,43 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout at bumped commit
+        uses: actions/checkout@v6
         with:
           ref: ${{ needs.bump.outputs.commit_sha }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: "24"
-          registry-url: "https://registry.npmjs.org"
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: ${{ env.REGISTRY_URL }}
           cache: "npm"
 
       - name: Install & Build
         run: npm ci && npm run build
 
-      - name: Publish
-        run: npm publish
+      - name: Publish to npm
+        run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-  # ── Step 3: Create GitHub Release (handles tagging automatically) ──────────
+  # ── Step 3: Create GitHub Release + auto-tag ──────────────────────────────
   release:
     needs: [bump, publish]
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write
+
     steps:
-      - uses: softprops/action-gh-release@v3
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.bump.outputs.NEW_VERSION }}
           generate_release_notes: true
+          body: |
+            ## Release v${{ needs.bump.outputs.NEW_VERSION }}
+
+            Auto-generated release from push to `main`.
+            Commit: ${{ needs.bump.outputs.commit_sha }}

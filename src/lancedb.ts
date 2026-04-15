@@ -172,10 +172,10 @@ export class NoesisDB {
 
     const filters: string[] = [];
     if (agentId && !crossAgent) {
-      filters.push(`agentId = '${agentId}'`);
+      filters.push(`agentId = '${escapeFilterValue(agentId)}'`);
     }
     if (memoryType) {
-      filters.push(`memoryType = '${memoryType}'`);
+      filters.push(`memoryType = '${escapeFilterValue(memoryType)}'`);
     }
     if (filters.length > 0) {
       query = query.where(filters.join(" AND "));
@@ -219,10 +219,10 @@ export class NoesisDB {
 
       const filters: string[] = [];
       if (agentId && !crossAgent) {
-        filters.push(`agentId = '${agentId}'`);
+        filters.push(`agentId = '${escapeFilterValue(agentId)}'`);
       }
       if (memoryType) {
-        filters.push(`memoryType = '${memoryType}'`);
+        filters.push(`memoryType = '${escapeFilterValue(memoryType)}'`);
       }
       if (filters.length > 0) {
         query = query.where(filters.join(" AND "));
@@ -255,7 +255,7 @@ export class NoesisDB {
     const tbl = this.getTable();
     const results = await tbl
       .query()
-      .where(`id = '${id}'`)
+      .where(`id = '${id.replace(/'/g, "''")}'`)
       .select(["id", "agentId", "sessionId", "content", "chunk", "embedding", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"])
       .limit(1)
       .toArray();
@@ -276,8 +276,8 @@ export class NoesisDB {
     const tbl = this.getTable();
 
     const filters: string[] = [];
-    if (agentId) filters.push(`agentId = '${agentId}'`);
-    if (sessionId) filters.push(`sessionId = '${sessionId}'`);
+    if (agentId) filters.push(`agentId = '${escapeFilterValue(agentId)}'`);
+    if (sessionId) filters.push(`sessionId = '${escapeFilterValue(sessionId)}'`);
 
     let query = tbl
       .query()
@@ -299,7 +299,7 @@ export class NoesisDB {
    */
   async deleteById(id: string): Promise<void> {
     const tbl = this.getTable();
-    await tbl.delete(`id = '${id}'`);
+    await tbl.delete(`id = '${id.replace(/'/g, "''")}'`);
   }
 
   /**
@@ -312,7 +312,7 @@ export class NoesisDB {
     try {
       const rows = await tbl
         .query()
-        .where(`id = '${id}'`)
+        .where(`id = '${id.replace(/'/g, "''")}'`)
         .limit(1)
         .toArray();
       if (rows.length === 0) return null;
@@ -321,9 +321,9 @@ export class NoesisDB {
       if (patch.priority !== undefined) updates["priority"] = String(patch.priority);
       if (patch.expiresAt !== undefined) updates["expiresAt"] = String(patch.expiresAt);
       if (Object.keys(updates).length === 0) return rowToEntry(r);
-      await tbl.update({ where: `id = '${id}'`, values: updates });
+      await tbl.update({ where: `id = '${id.replace(/'/g, "''")}'`, values: updates });
       // Refetch after update
-      const refreshed = await tbl.query().where(`id = '${id}'`).limit(1).toArray();
+      const refreshed = await tbl.query().where(`id = '${id.replace(/'/g, "''")}'`).limit(1).toArray();
       return refreshed.length > 0 ? rowToEntry(refreshed[0] as any) : null;
     } catch {
       return null;
@@ -336,8 +336,8 @@ export class NoesisDB {
   async exportAll(agentId?: string, memoryType?: string): Promise<MemoryEntry[]> {
     const tbl = this.getTable();
     const filters: string[] = [];
-    if (agentId) filters.push(`agentId = '${agentId}'`);
-    if (memoryType) filters.push(`memoryType = '${memoryType}'`);
+    if (agentId) filters.push(`agentId = '${escapeFilterValue(agentId)}'`);
+    if (memoryType) filters.push(`memoryType = '${escapeFilterValue(memoryType)}'`);
     let query = tbl.query().select(["id", "agentId", "sessionId", "content", "chunk", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"]).limit(100_000);
     if (filters.length > 0) query = query.where(filters.join(" AND "));
     const rows = await query.toArray();
@@ -350,7 +350,7 @@ export class NoesisDB {
   async count(agentId?: string): Promise<number> {
     const tbl = this.getTable();
     if (agentId) {
-      return tbl.countRows(`agentId = '${agentId}'`);
+      return tbl.countRows(`agentId = '${escapeFilterValue(agentId)}'`);
     }
     return tbl.countRows();
   }
@@ -467,8 +467,8 @@ export class NoesisDB {
     try {
       await this.ensureAnnIndexArchive();
       const filters: string[] = [];
-      if (agentId && !crossAgent) filters.push(`agentId = '${agentId}'`);
-      if (memoryType) filters.push(`memoryType = '${memoryType}'`);
+      if (agentId && !crossAgent) filters.push(`agentId = '${escapeFilterValue(agentId)}'`);
+      if (memoryType) filters.push(`memoryType = '${escapeFilterValue(memoryType)}'`);
 
       let query = tbl
         .vectorSearch(embedding)
@@ -512,8 +512,8 @@ export class NoesisDB {
     try {
       await this.ensureFtsIndexArchive();
       const filters: string[] = [];
-      if (agentId && !crossAgent) filters.push(`agentId = '${agentId}'`);
-      if (memoryType) filters.push(`memoryType = '${memoryType}'`);
+      if (agentId && !crossAgent) filters.push(`agentId = '${escapeFilterValue(agentId)}'`);
+      if (memoryType) filters.push(`memoryType = '${escapeFilterValue(memoryType)}'`);
 
       let query = (tbl.search(queryText, "fts") as any)
         .select(["id", "agentId", "sessionId", "content", "memoryType", "createdAt", "sourcePath", "tags", "priority", "expiresAt"])
@@ -703,6 +703,11 @@ export class NoesisDB {
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
+
+/** Escape a string value for use in a SQL WHERE clause filter string. */
+function escapeFilterValue(value: string): string {
+  return value.replace(/'/g, "''");
+}
 
 function resolvePath(p: string): string {
   return p.replace(/^~/, os.homedir());

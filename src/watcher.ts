@@ -260,27 +260,26 @@ function parseSessionPath(filePath: string): { agentId: string; sessionId: strin
   const parts = rel.split(path.sep).filter(Boolean);
 
   // Pattern: agents/<agentId>/qmd/sessions/<sessionId>.jsonl
-  if (parts[0] === "agents" && parts.length >= 5 && parts[3] === "sessions" && parts[2] === "qmd") {
+  // Note: relative path includes .openclaw prefix, e.g. .openclaw/agents/<agentId>/qmd/sessions/<sessionId>.jsonl
+  if (parts.length >= 5 && parts[1] === "agents" && parts[3] === "sessions" && parts[2] === "qmd") {
     return { agentId: parts[1], sessionId: path.basename(parts[4], ".jsonl") };
   }
   // Pattern: agents/<agentId>/sessions/<sessionId>.jsonl
-  if (parts[0] === "agents" && parts.length >= 4 && parts[2] === "sessions") {
-    return { agentId: parts[1], sessionId: path.basename(parts[3], ".jsonl") };
+  if (parts.length >= 4 && parts[1] === "agents" && parts[3] === "sessions") {
+    return { agentId: parts[2], sessionId: path.basename(parts[4], ".jsonl") };
   }
   // Pattern: .openclaw/sessions/<agentId>/<sessionId>.jsonl
-  if (parts[1] === "sessions" && parts.length >= 3 && parts[2] !== "sessions") {
+  if (parts[2] === "sessions" && parts.length >= 4 && parts[3] !== "sessions") {
     const last = parts[parts.length - 1];
-    if (!last.endsWith(".jsonl") && parts.length >= 3) {
-      return { agentId: parts[2], sessionId: path.basename(parts[parts.length - 1], ".jsonl") };
-    }
-    return { agentId: parts[2], sessionId: path.basename(parts[parts.length - 1], ".jsonl") };
+    return { agentId: parts[3], sessionId: path.basename(last, ".jsonl") };
   }
-  // Pattern: .openclaw/sessions/<sessionId>.jsonl (flat)
-  if (parts[1] === "sessions" && parts.length === 2) {
-    return { agentId: "unknown", sessionId: path.basename(parts[1], ".jsonl") };
+  // Pattern: .openclaw/sessions/<agentId>/<sessionId>.jsonl
+  if (parts[2] === "sessions" && parts.length >= 3 && parts[3] !== "sessions") {
+    const last = parts[parts.length - 1];
+    return { agentId: parts[3], sessionId: path.basename(last, ".jsonl") };
   }
 
-  // Fallback
+  // Fallback: last resort — try to extract sessionId from filename
   return { agentId: "unknown", sessionId: path.basename(filePath, ".jsonl") };
 }
 

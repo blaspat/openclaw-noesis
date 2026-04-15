@@ -14,7 +14,7 @@ env:
   REGISTRY_URL: "https://registry.npmjs.org"
 
 jobs:
-  # ── Step 1: Bump version + create verified commit via GitHub API ────────────
+  # Step 1: Bump version and create verified commit via GitHub API
   bump:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -44,21 +44,21 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           echo "NEW_VERSION=$VERSION" >> $GITHUB_OUTPUT
 
-          # Create commit via GitHub REST API — shows as "Verified" automatically
+          # Create commit via GitHub REST API - shows as "Verified" automatically
           node scripts/github-commit.js \
             "${{ github.repository_owner }}" \
             "${{ github.event.repository.name }}" \
             "main" \
             "chore: bump version to v$VERSION"
 
-          # Extract commit SHA from the script output
+          # Extract new commit SHA from the updated branch ref
           COMMIT_SHA=$(gh api repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/git/refs/heads/main --jq .object.sha)
           echo "COMMIT_SHA=$COMMIT_SHA" >> $GITHUB_OUTPUT
 
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── Step 2: Publish to npm on the bumped commit ─────────────────────────────
+  # Step 2: Publish to npm on the bumped commit
   publish:
     needs: bump
     runs-on: ubuntu-latest
@@ -77,7 +77,7 @@ jobs:
           registry-url: ${{ env.REGISTRY_URL }}
           cache: "npm"
 
-      - name: Install & Build
+      - name: Install and Build
         run: npm ci && npm run build
 
       - name: Publish to npm
@@ -85,7 +85,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-  # ── Step 3: Create GitHub Release + auto-tag ──────────────────────────────
+  # Step 3: Create GitHub Release (handles tagging automatically)
   release:
     needs: [bump, publish]
     runs-on: ubuntu-latest

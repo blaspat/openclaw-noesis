@@ -162,6 +162,20 @@ function inferMemoryType(content: string): MemoryType {
 }
 
 /**
+ * Auto-assign priority based on memory type. Mirrors the logic in index.ts.
+ */
+function autoPriorityForType(memoryType: MemoryType): number {
+  const map: Record<MemoryType, number> = {
+    decision: 85,
+    preference: 80,
+    context: 60,
+    fact: 30,
+    session: 20,
+  };
+  return map[memoryType] ?? 30;
+}
+
+/**
  * Index a markdown memory file.
  * Parses by ## headings, creates entries per section.
  * Deduplicates by content checksum per agent.
@@ -202,7 +216,7 @@ async function indexMemoryFile(
 
   // Deduplicate by checksum per agent
   const seen = new Set<string>();
-  const unique = allChunks.filter(({ content, chunk }) => {
+  const unique = allChunks.filter(({ content }) => {
     const cs = contentChecksum(content, agentId);
     if (seen.has(cs)) return false;
     seen.add(cs);
@@ -226,7 +240,7 @@ async function indexMemoryFile(
         chunk: b.chunk,
         embedding: embeddings[j],
         memoryType: inferMemoryType(b.content),
-        priority: 0,
+        priority: autoPriorityForType(inferMemoryType(b.content)),
         expiresAt: 0,
         createdAt: now,
         sourcePath: filePath,
@@ -260,26 +274,31 @@ function parseSessionPath(filePath: string): { agentId: string; sessionId: strin
   const parts = rel.split(path.sep).filter(Boolean);
 
   // Pattern: agents/<agentId>/qmd/sessions/<sessionId>.jsonl
-  // Note: relative path includes .openclaw prefix, e.g. .openclaw/agents/<agentId>/qmd/sessions/<sessionId>.jsonl
-  if (parts.length >= 5 && parts[1] === "agents" && parts[3] === "sessions" && parts[2] === "qmd") {
-    return { agentId: parts[1], sessionId: path.basename(parts[4], ".jsonl") };
+  // e.g. ~/.openclaw/agents/kate/qmd/sessions/abc123.jsonl
+  // parts = [".openclaw", "agents", "kate", "qmd", "sessions", "abc123.jsonl"]
+  if (parts.length >= 6 && parts[1] === "agents" && parts[3] === "qmd" && parts[4] === "sessions") {
+    return { agentId: parts[2], sessionId: path.basename(parts[5], ".jsonl") };
   }
   // Pattern: agents/<agentId>/sessions/<sessionId>.jsonl
-  if (parts.length >= 4 && parts[1] === "agents" && parts[3] === "sessions") {
+  // e.g. ~/.openclaw/agents/kate/sessions/abc123.jsonl
+  // parts = [".openclaw", "agents", "kate", "sessions", "abc123.jsonl"]
+  if (parts.length >= 5 && parts[1] === "agents" && parts[3] === "sessions") {
     return { agentId: parts[2], sessionId: path.basename(parts[4], ".jsonl") };
   }
-  // Pattern: .openclaw/sessions/<agentId>/<sessionId>.jsonl
-  if (parts[2] === "sessions" && parts.length >= 4 && parts[3] !== "sessions") {
-    const last = parts[parts.length - 1];
-    return { agentId: parts[3], sessionId: path.basename(last, ".jsonl") };
+  // Pattern: sessions/<agentId>/<sessionId>.jsonl
+  // e.g. ~/.openclaw/sessions/kate/abc123.jsonl
+  // parts = [".openclaw", "sessions", "kate", "abc123.jsonl"]
+  if (parts.length >= 4 && parts[1] === "sessions" && parts[2] !== "sessions") {
+    return { agentId: parts[2], sessionId: path.basename(parts[3], ".jsonl") };
   }
-  // Pattern: .openclaw/sessions/<agentId>/<sessionId>.jsonl
-  if (parts[2] === "sessions" && parts.length >= 3 && parts[3] !== "sessions") {
-    const last = parts[parts.length - 1];
-    return { agentId: parts[3], sessionId: path.basename(last, ".jsonl") };
+  // Pattern: sessions/<sessionId>.jsonl (bare session, no agent folder)
+  // e.g. ~/.openclaw/sessions/abc123.jsonl
+  // parts = [".openclaw", "sessions", "abc123.jsonl"]
+  if (parts.length >= 3 && parts[1] === "sessions") {
+    return { agentId: "unknown", sessionId: path.basename(parts[2], ".jsonl") };
   }
 
-  // Fallback: last resort — try to extract sessionId from filename
+  // Fallback
   return { agentId: "unknown", sessionId: path.basename(filePath, ".jsonl") };
 }
 
@@ -373,7 +392,7 @@ async function indexSessionFile(
         chunk: b.chunk,
         embedding: embeddings[j],
         memoryType: "session" as MemoryType,
-        priority: 0,
+        priority: autoPriorityForType("session"),
         expiresAt: 0,
         createdAt: Date.now(),
         sourcePath: filePath,

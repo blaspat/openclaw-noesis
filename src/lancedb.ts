@@ -684,7 +684,7 @@ export class NoesisDB {
       .where(`priority >= ${minPriority}`)
       .limit(limit);
 
-    const results = await (query as any).toArray();
+    const results = await query.toArray();
     const entries = (results as any[]).map(rowToEntry);
 
     // Filter out expired

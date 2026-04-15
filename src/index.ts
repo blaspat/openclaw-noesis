@@ -25,8 +25,10 @@ import { startQmdWatcher, SessionWatcher, startMemoryWatcher } from "./watcher.j
 let db: NoesisDB | null = null;
 let ollama: OllamaClient | null = null;
 let watcher: SessionWatcher | null = null;
+let memoryWatcher: SessionWatcher | null = null;
 let resolvedConfig: NoesisConfig = { ...DEFAULT_CONFIG };
 let initialized = false;
+let cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
 
 // ─── plugin entry ──────────────────────────────────────────────────────────
 
@@ -236,20 +238,28 @@ export default definePluginEntry({
             };
           }
 
+          // Track which results actually came from the archive (by checking expiresAt > 0
+          // AND createdAt is older than 90 days — only archived entries have both conditions)
+          const archiveIds = new Set(
+            results
+              .filter(r => r.expiresAt > 0 && r.createdAt < Date.now() - 90 * 86400 * 1000)
+              .map(r => r.id)
+          );
+
           const formatted = results
             .map(
               (r, i) => {
-                const fromArchive = r.expiresAt > 0 && r.createdAt < (Date.now() - 90 * 86400 * 1000) ? " [archived]" : "";
+                const fromArchive = archiveIds.has(r.id) ? " [archived]" : "";
                 return `${i + 1}. [${r.memoryType}]${fromArchive} [score=${r.score.toFixed(3)}] ${r.content.slice(0, 300)}${r.content.length > 300 ? "…" : ""}`;
               }
             )
             .join("\n\n");
 
-          const hasArchived = results.some(r => r.expiresAt > 0);
-          const header = hasArchived ? `(Includes ${results.filter(r => r.expiresAt > 0).length} archived memory\n\n)` : "";
+          const archivedCount = results.filter(r => archiveIds.has(r.id)).length;
+          const archiveNote = archivedCount > 0 ? `(Includes ${archivedCount} archived memory\n\n)` : "";
 
           return {
-            content: [{ type: "text", text: `Found ${results.length} result(s)${hasArchived ? " (including archived)" : ""}:\n\n${formatted}` }],
+            content: [{ type: "text", text: `Found ${results.length} result(s)${archivedCount > 0 ? ` (including ${archivedCount} archived)` : ""}:\n\n${archiveNote}${formatted}` }],
             details: { count: results.length, results },
           };
         },
@@ -627,6 +637,8 @@ export default definePluginEntry({
           sessionId: Type.Optional(Type.String()),
           memoryType: Type.Optional(Type.String()),
           tags: Type.Optional(Type.Array(Type.String())),
+          priority: Type.Optional(Type.Number()),
+          ttlDays: Type.Optional(Type.Number()),
         }),
         async execute(_toolCallId: string, params: any) {
           await ensureInitialized();
@@ -911,7 +923,7 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
 
   // 5. Optional: watch agent memory dirs
   if (config.watchMemoryDirs) {
-    startMemoryWatcher(db, ollama, config, log);
+    memoryWatcher = startMemoryWatcher(db, ollama, config, log);
   }
 
   // 6. Optional: auto-cleanup expired entries on startup
@@ -927,7 +939,7 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
   // 7. Optional: periodic TTL cleanup on interval
   if (config.cleanupIntervalHours > 0) {
     const intervalMs = config.cleanupIntervalHours * 60 * 60 * 1000;
-    setInterval(() => {
+    cleanupIntervalId = setInterval(() => {
       db.archiveExpired()
         .then((n) => { if (n > 0) log(`[noesis] Periodic cleanup archived ${n} entries.`); })
         .catch((err) => log(`[noesis] Periodic cleanup error: ${err}`));

@@ -36,24 +36,79 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Bump version and create GitHub API commit
+      - name: Bump version and create verified commit via GitHub API
         id: bump
         run: |
           node scripts/bump-version.js
           VERSION=$(node -p "require('./package.json').version")
           echo "NEW_VERSION=$VERSION" >> $GITHUB_OUTPUT
 
-          node scripts/github-commit.js \
-            "${{ github.repository_owner }}" \
-            "${{ github.event.repository.name }}" \
-            "main" \
-            "chore: bump version to v$VERSION"
-
-          COMMIT_SHA=$(gh api repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/git/refs/heads/main --jq .object.sha)
+          COMMIT_SHA=$(node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            const plugin = JSON.parse(fs.readFileSync('openclaw.plugin.json', 'utf8'));
+            const token = process.env.GITHUB_TOKEN;
+            const owner = '${{ github.repository_owner }}';
+            const repo = '${{ github.event.repository.name }}';
+            const branch = 'main';
+            const message = 'chore: bump version to v' + process.argv[1];
+            async function run() {
+              const base = 'https://api.github.com/repos/' + owner + '/' + repo;
+              // Get current branch SHA
+              const refRes = await fetch(base + '/git/ref/heads/' + branch, {
+                headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json' }
+              });
+              const refData = await refRes.json();
+              const currentSha = refData.object.sha;
+              // Create blobs
+              const createBlob = (content) => fetch(base + '/git/blobs', {
+                method: 'POST',
+                headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', Accept: 'application/vnd.github+json' },
+                body: JSON.stringify({ content, encoding: 'utf-8' })
+              }).then(r => r.json());
+              const [blobPkg, blobPlugin] = await Promise.all([
+                createBlob(fs.readFileSync('package.json', 'utf8')),
+                createBlob(fs.readFileSync('openclaw.plugin.json', 'utf8'))
+              ]);
+              // Create tree
+              const treeRes = await fetch(base + '/git/trees', {
+                method: 'POST',
+                headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', Accept: 'application/vnd.github+json' },
+                body: JSON.stringify({
+                  tree: [
+                    { path: 'package.json', mode: '100644', type: 'blob', sha: blobPkg.sha },
+                    { path: 'openclaw.plugin.json', mode: '100644', type: 'blob', sha: blobPlugin.sha }
+                  ],
+                  base_tree: currentSha
+                })
+              });
+              const treeData = await treeRes.json();
+              // Create commit
+              const commitRes = await fetch(base + '/git/commits', {
+                method: 'POST',
+                headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', Accept: 'application/vnd.github+json' },
+                body: JSON.stringify({
+                  message,
+                  tree: treeData.sha,
+                  parents: [currentSha],
+                  author: { name: 'github-actions[bot]', email: 'github-actions[bot]@users.noreply.github.com' }
+                })
+              });
+              const commitData = await commitRes.json();
+              // Update branch ref
+              await fetch(base + '/git/refs/heads/' + branch, {
+                method: 'PATCH',
+                headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', Accept: 'application/vnd.github+json' },
+                body: JSON.stringify({ sha: commitData.sha, force: true })
+              });
+              console.log(commitData.sha);
+            }
+            run().catch(e => { console.error(e); process.exit(1); });
+          " "$VERSION")
           echo "COMMIT_SHA=$COMMIT_SHA" >> $GITHUB_OUTPUT
 
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish:
     needs: bump

@@ -1,6 +1,6 @@
 # Noesis — Local-First Semantic Memory for OpenClaw
 
-**v1.0.0** · Local-first semantic memory + context engine for OpenClaw. No API keys. No cloud. Memory layer + proactive context assembly (zero LLM cost).
+Local-first semantic memory + context engine for OpenClaw. No API keys. No cloud. Memory layer + proactive context assembly (zero LLM cost).
 
 Noesis gives your OpenClaw agents a persistent, searchable memory layer backed by [LanceDB](https://lancedb.com) and [Ollama](https://ollama.ai). It slots directly into OpenClaw's memory system so the auto-recall loop just works — your agents remember things across sessions, across restarts, and across each other.
 

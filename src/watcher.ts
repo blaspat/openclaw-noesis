@@ -308,15 +308,28 @@ async function indexSessionFile(
   for (const line of lines) {
     try {
       const entry = JSON.parse(line) as {
-        role?: string;
-        content?: string | Array<{ type: string; text?: string }>;
         type?: string;
+        message?: {
+          role?: string;
+          content?: string | Array<{ type: string; text?: string }>;
+        };
+        content?: string | Array<{ type: string; text?: string }>;
         text?: string;
       };
 
-      // Extract text content from various QMD event shapes
+      // Extract text content from session JSONL format (entry.message.content)
       let text = "";
-      if (typeof entry.content === "string") {
+      const msg = entry.message;
+      if (msg?.content) {
+        if (typeof msg.content === "string") {
+          text = msg.content;
+        } else if (Array.isArray(msg.content)) {
+          text = msg.content
+            .filter((b) => b.type === "text" && b.text)
+            .map((b) => b.text!)
+            .join(" ");
+        }
+      } else if (typeof entry.content === "string") {
         text = entry.content;
       } else if (Array.isArray(entry.content)) {
         text = entry.content

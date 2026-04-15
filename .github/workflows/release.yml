@@ -20,7 +20,7 @@ jobs:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
 
       - name: Get tag version
-        run: echo "TAG=v$(node -p \"require('./package.json').version\")" >> $GITHUB_ENV
+        run: echo 'TAG=v'$(node -p "require('./package.json').version") >> $GITHUB_ENV
 
       - name: Setup Node
         uses: actions/setup-node@v6

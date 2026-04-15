@@ -1,17 +1,24 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
+  pull_request:
+    types: [closed]
+    branches:
+      - main
 
 jobs:
   publish:
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Get tag version
+        run: echo "TAG=v$(date +%Y.%m.%d)-$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_ENV
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -31,6 +38,6 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/release-gh-action@v2
         with:
-          files: ""
+          tag_name: ${{ env.TAG }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

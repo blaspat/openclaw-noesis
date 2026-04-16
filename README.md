@@ -80,10 +80,11 @@ QMD covers the basics well. Noesis builds on it with features for more structure
 openclaw plugins install clawhub:@blaspat/openclaw-noesis
 ```
 
-### 2. Set the memory slot
+### 2. Set the memory slot and context engine slot
 
 ```bash
 openclaw config set plugins.slots.memory noesis
+openclaw config set plugins.slots.contextEngine noesis
 ```
 
 Or edit your OpenClaw config:

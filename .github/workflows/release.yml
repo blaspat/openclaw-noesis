@@ -2,34 +2,35 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
 
 permissions:
-  contents: read
-  id-token: write
-
-env:
-  NODE_VERSION: "24"
-  REGISTRY_URL: "https://registry.npmjs.org"
+  contents: write
+  pull-requests: write
 
 jobs:
-  publish:
+  release-please:
     runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.release.outputs.released }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v6
+      - uses: googleapis/release-please-action@v4
+        id: release
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          registry-url: ${{ env.REGISTRY_URL }}
-          scope: '@blaspat'
-          cache: 'npm'
-
-      - name: Install & Build
-        run: npm ci && npm run build
-
-      - name: Publish to npm
-        run: NODE_AUTH_TOKEN="" npm publish
+          token: ${{ secrets.GITHUB_TOKEN }}
+          release-type: node
+          package-name: "@blaspat/openclaw-noesis"
+          default-branch: main
+          changelog-path: CHANGELOG.md
+          version-file: package.json
+          extra-files: openclaw.plugin.json
+          commit-message: "chore: release {{version}}"
+          pr-title: "chore: release {{version}}"
+          labels: "autorelease"
+          filterIncludes: "autorelease"

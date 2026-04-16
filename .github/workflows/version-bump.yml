@@ -8,80 +8,34 @@ on:
       - opened
       - synchronize
       - reopened
-      - ready_for_review
-
-concurrency:
-  # Only one bump workflow per PR at a time
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  # Don't cancel — let it finish so the status check gets reported to the commit
-  # cancel-in-progress: true
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
-  version-bump:
+  bump-version:
     runs-on: ubuntu-latest
-    # Always pass — this job bumps the version, so if it runs, it succeeds.
-    # The check "passed" means the version is up-to-date in the PR branch.
-    outputs:
-      bumped: ${{ steps.bump.outputs.bumped }}
-      new_version: ${{ steps.bump.outputs.new_version }}
     steps:
-      - name: Checkout PR branch
+      - name: Checkout PR Branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.head_ref }}
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Bump version
-        id: bump
-        run: |
-          set -e
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          CURRENT=$(node -p "require('./package.json').version")
-          MAJOR=$(echo $CURRENT | cut -d. -f1)
-          MINOR=$(echo $CURRENT | cut -d. -f2)
-          PATCH=$(echo $CURRENT | cut -d. -f3)
-          NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
-
-          echo "Current: $CURRENT → New: $NEW_VERSION"
-
-          # Update package.json
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json','utf8'));
-            pkg.version = '${NEW_VERSION}';
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-            console.log('package.json → ' + pkg.version);
-          "
-
-          # Update openclaw.plugin.json if it exists
-          if [ -f openclaw.plugin.json ]; then
-            node -e "
-              const fs = require('fs');
-              const p = JSON.parse(fs.readFileSync('openclaw.plugin.json','utf8'));
-              p.version = '${NEW_VERSION}';
-              fs.writeFileSync('openclaw.plugin.json', JSON.stringify(p, null, 2) + '\n');
-              console.log('openclaw.plugin.json → ' + p.version);
-            "
-          fi
-
-          git add package.json openclaw.plugin.json 2>/dev/null || true
-          CHANGES=$(git diff --cached --stat)
-          if [ -z "$CHANGES" ]; then
-            echo "bumped=false" >> $GITHUB_OUTPUT
-            echo "No changes to commit — version already current"
-            echo "new_version=$CURRENT" >> $GITHUB_OUTPUT
-          else
-            git commit -m "chore: bump version to ${NEW_VERSION}"
-            git push origin ${{ github.event.pull_request.head.ref }}
-            echo "bumped=true" >> $GITHUB_OUTPUT
-            echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
-            echo "Version bumped and pushed: ${NEW_VERSION}"
-          fi
+      - name: Automated Version Bump
+        uses: phips28/gh-action-bump-version@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Conventional commit keywords
+          minor-wording: "feat:,FEATURE:,feature:"
+          major-wording: "BREAKING:,MAJOR:"
+          patch-wording: "fix:,patch:,bug:,hotfix:"
+          default: "patch"
+          # Update both package.json and openclaw.plugin.json
+          target-files: |
+            package.json
+            openclaw.plugin.json
+          commit-message: "chore: bump version to {{version}}"
+          tag-message: "v{{version}}"

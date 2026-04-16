@@ -1,0 +1,40 @@
+name: "Push Tag on Merge"
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  push-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get current version from main
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "TAG=v${VERSION}" >> $GITHUB_OUTPUT
+
+          if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
+            echo "ALREADY_TAGGED=true" >> $GITHUB_OUTPUT
+          else
+            echo "ALREADY_TAGGED=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Push version tag
+        if: steps.version.outputs.ALREADY_TAGGED == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.version.outputs.TAG }}"
+          git push origin "${{ steps.version.outputs.TAG }}"
+          echo "Pushed tag: ${{ steps.version.outputs.TAG }}"

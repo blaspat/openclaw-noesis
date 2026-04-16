@@ -24,4 +24,4 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Bump version
-        run: ./scripts/bump-version.sh ${{ github.event.inputs.bump_type || 'patch' }}
+        run: bash scripts/bump-version.sh ${{ github.event.inputs.bump_type || 'patch' }}

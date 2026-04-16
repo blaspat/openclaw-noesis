@@ -107,6 +107,11 @@
         "type": "number",
         "default": 30,
         "description": "Max age (days) for Assemble injection. 0 = no limit."
+      },
+      "errorLogPath": {
+        "type": "string",
+        "default": "~/.openclaw/noesis/error.log",
+        "description": "Path to dedicated error log file. Errors from init and all tools are written here as structured JSON lines."
       }
     }
   }

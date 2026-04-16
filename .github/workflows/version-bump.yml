@@ -2,7 +2,7 @@ name: Version Bump
 
 on:
   pull_request_target:
-    types: [synchronize, edited, ready_for_review, labeled, reopened]
+    types: [opened, synchronize, edited, ready_for_review, labeled, reopened]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}

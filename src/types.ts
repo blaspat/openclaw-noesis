@@ -66,6 +66,8 @@ export interface NoesisConfig {
   assembleMaxEntries: number;
   /** Max age (days) for Assemble injection. 0 = no limit. Default: 30 */
   assembleMaxAgeDays: number;
+  /** Path to dedicated error log file. Default: ~/.openclaw/noesis/error.log */
+  errorLogPath: string;
 }
 
 export const DEFAULT_CONFIG: NoesisConfig = {
@@ -89,6 +91,7 @@ export const DEFAULT_CONFIG: NoesisConfig = {
   assembleInjectPriority: 75,
   assembleMaxEntries: 20,
   assembleMaxAgeDays: 30,
+  errorLogPath: "~/.openclaw/noesis/error.log",
 };
 
 export interface ImportResult {

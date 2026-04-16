@@ -13,7 +13,7 @@ permissions:
   contents: write
 
 jobs:
-  bump-version:
+  version-bump:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR Branch
@@ -28,12 +28,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # Conventional commit keywords
           minor-wording: "feat:,FEATURE:,feature:"
           major-wording: "BREAKING:,MAJOR:"
           patch-wording: "fix:,patch:,bug:,hotfix:"
           default: "patch"
-          # Update both package.json and openclaw.plugin.json
           target-files: |
             package.json
             openclaw.plugin.json

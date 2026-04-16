@@ -4,103 +4,33 @@ on:
   push:
     branches:
       - main
-  pull_request_target:
-    types: [opened, synchronize, edited, ready_for_review, labeled, reopened]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
-  id-token: write
-
-env:
-  NODE_VERSION: "24"
-  REGISTRY_URL: "https://registry.npmjs.org"
+  pull-requests: write
 
 jobs:
-  version-bump:
+  release-please:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request_target'
-    permissions:
-      contents: write
-
+    outputs:
+      released: ${{ steps.release.outputs.released }}
     steps:
-      - name: Checkout PR branch
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - uses: googleapis/release-please-action@v4
+        id: release
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
-          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Bump version inline
-        id: bump
-        run: |
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json','utf8'));
-            const [major, minor, patch] = pkg.version.split('.').map(Number);
-            const newVersion = major+'.'+minor+'.'+(patch+1);
-            console.log('Bump:', pkg.version, '->', newVersion);
-            pkg.version = newVersion;
-            fs.writeFileSync('package.json', JSON.stringify(pkg,null,2)+'\n');
-            const plugin = JSON.parse(fs.readFileSync('openclaw.plugin.json','utf8'));
-            plugin.version = newVersion;
-            fs.writeFileSync('openclaw.plugin.json', JSON.stringify(plugin,null,2)+'\n');
-            console.log('Files updated');
-          "
-
-      - name: Push version bump to PR branch
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json openclaw.plugin.json
-          git diff --cached --stat
-          git commit -m "[bot] chore: bump version" || echo "No changes"
-          git push origin ${{ github.event.pull_request.head.ref }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  release:
-    needs: version-bump
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          registry-url: ${{ env.REGISTRY_URL }}
-
-      - name: Install and Build
-        run: npm ci && npm run build
-
-      - name: Get version
-        id: version
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "TAG=v$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Publish to npm
-        run: NODE_AUTH_TOKEN="" npm publish
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: v${{ steps.version.outputs.VERSION }}
-          generate_release_notes: true
+          release-type: node
+          package-name: "@blaspat/openclaw-noesis"
+          default-branch: main
+          changelog-path: CHANGELOG.md
+          version-file: package.json
+          extra-files: openclaw.plugin.json
+          commit-message: "chore: release {{version}}"
+          pr-title: "chore: release {{version}}"
+          labels: "autorelease"
+          filterIncludes: "autorelease"

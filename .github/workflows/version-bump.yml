@@ -25,9 +25,6 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Install deps
-        run: npm ci
-
       - name: Bump version inline
         id: bump
         run: |

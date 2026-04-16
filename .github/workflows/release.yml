@@ -10,7 +10,7 @@ permissions:
   id-token: write
 
 env:
-  NODE_VERSION: "22"
+  NODE_VERSION: "24"
   REGISTRY_URL: "https://registry.npmjs.org"
 
 jobs:
@@ -21,7 +21,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: ${{ env.REGISTRY_URL }}

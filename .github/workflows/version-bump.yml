@@ -8,6 +8,17 @@ on:
       - opened
       - synchronize
       - reopened
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: 'Version bump type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 permissions:
   contents: write
@@ -25,3 +36,11 @@ jobs:
 
       - name: Bump version
         run: bash scripts/bump-version.sh ${{ github.event.inputs.bump_type || 'patch' }}
+
+      - name: Commit version bump
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json openclaw.plugin.json
+          git commit -m "chore: bump version to ${{ steps.bump.outputs.version }}"
+          git push

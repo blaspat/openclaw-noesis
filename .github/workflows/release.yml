@@ -41,9 +41,7 @@ jobs:
           echo "TAG=v$VERSION" >> $GITHUB_OUTPUT
 
       - name: Publish to npm
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ""
+        run: NODE_AUTH_TOKEN="" npm publish
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3

@@ -16,9 +16,15 @@ import fs from "fs";
 import { DEFAULT_CONFIG, MemoryEntry, MemoryType, NoesisConfig } from "./types.js";
 import { autoConfigOllama, OllamaClient, contentChecksum, chunkText } from "./ollama.js";
 import { NoesisDB } from "./lancedb.js";
-import { hybridSearch } from "./search.js";
+import { hybridSearch, cosineSimilarityDense } from "./search.js";
 import { importMarkdownFiles, importAllAgents } from "./migrator.js";
 import { startQmdWatcher, SessionWatcher, startMemoryWatcher } from "./watcher.js";
+import {
+  logError,
+  logFatal,
+  installGlobalErrorHandlers,
+  configureErrorLog,
+} from "./logger.js";
 
 // ─── plugin state (module-level singletons) ────────────────────────────────
 
@@ -86,63 +92,68 @@ export default definePluginEntry({
           sourcePath: Type.Optional(Type.String({ description: "Source file path if applicable" })),
         }),
         async execute(_toolCallId: string, params: any) {
-          await ensureInitialized();
-          const content = String(params.content ?? "").trim();
-          if (!content) {
-            return { content: [{ type: "text", text: "Error: content is required." }], details: {} };
+          try {
+            await ensureInitialized();
+            const content = String(params.content ?? "").trim();
+            if (!content) {
+              return { content: [{ type: "text", text: "Error: content is required." }], details: {} };
+            }
+
+            const agentId = String(params.agentId ?? "unknown");
+            const sessionId = String(params.sessionId ?? "manual");
+            const tags: string[] = Array.isArray(params.tags) ? params.tags.map(String) : [];
+            const memoryType = (params.memoryType ?? "fact") as MemoryType;
+            const autoPriorityByType: Record<MemoryType, number> = {
+              decision: 85,
+              preference: 80,
+              context: 60,
+              fact: 30,
+              session: 20,
+            };
+            const autoPriority = autoPriorityByType[memoryType] ?? 30;
+            const priority = params.priority !== undefined && params.priority !== null
+              ? Math.min(100, Math.max(0, Number(params.priority)))
+              : autoPriority;
+            const ttlDays = Number(params.ttlDays ?? resolvedConfig.defaultTtlDays);
+            const expiresAt = ttlDays > 0 ? Date.now() + ttlDays * 86400 * 1000 : 0;
+            const sourcePath = String(params.sourcePath ?? "");
+
+            const chunks = chunkText(content, resolvedConfig.chunkSize, resolvedConfig.chunkOverlap);
+            const embeddings = await ollama!.embedBatch(chunks);
+
+            const entries = chunks.map((chunk, i) => ({
+              id: randomUUID(),
+              agentId,
+              sessionId,
+              content,
+              chunk,
+              embedding: embeddings[i],
+              memoryType,
+              priority,
+              expiresAt,
+              createdAt: Date.now(),
+              sourcePath,
+              checksum: contentChecksum(content + chunk, agentId),
+              tags,
+            }));
+
+            const inserted = await db!.upsertEntries(entries);
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: inserted > 0
+                    ? `Indexed ${inserted} chunk(s) for agent '${agentId}'. Total entries: ${await db!.count()}`
+                    : `Content already indexed (checksum match). No duplicates stored.`,
+                },
+              ],
+              details: { inserted, chunks: chunks.length },
+            };
+          } catch (err) {
+            logError("noesis_index failed", { error: err, tool: "noesis_index", agentId: String(params.agentId ?? "unknown") });
+            throw err;
           }
-
-          const agentId = String(params.agentId ?? "unknown");
-          const sessionId = String(params.sessionId ?? "manual");
-          const tags: string[] = Array.isArray(params.tags) ? params.tags.map(String) : [];
-          const memoryType = (params.memoryType ?? "fact") as MemoryType;
-          const autoPriorityByType: Record<MemoryType, number> = {
-            decision: 85,
-            preference: 80,
-            context: 60,
-            fact: 30,
-            session: 20,
-          };
-          const autoPriority = autoPriorityByType[memoryType] ?? 30;
-          const priority = params.priority !== undefined && params.priority !== null
-            ? Math.min(100, Math.max(0, Number(params.priority)))
-            : autoPriority;
-          const ttlDays = Number(params.ttlDays ?? resolvedConfig.defaultTtlDays);
-          const expiresAt = ttlDays > 0 ? Date.now() + ttlDays * 86400 * 1000 : 0;
-          const sourcePath = String(params.sourcePath ?? "");
-
-          const chunks = chunkText(content, resolvedConfig.chunkSize, resolvedConfig.chunkOverlap);
-          const embeddings = await ollama!.embedBatch(chunks);
-
-          const entries = chunks.map((chunk, i) => ({
-            id: randomUUID(),
-            agentId,
-            sessionId,
-            content,
-            chunk,
-            embedding: embeddings[i],
-            memoryType,
-            priority,
-            expiresAt,
-            createdAt: Date.now(),
-            sourcePath,
-            checksum: contentChecksum(content + chunk, agentId),
-            tags,
-          }));
-
-          const inserted = await db!.upsertEntries(entries);
-
-          return {
-            content: [
-              {
-                type: "text",
-                text: inserted > 0
-                  ? `Indexed ${inserted} chunk(s) for agent '${agentId}'. Total entries: ${await db!.count()}`
-                  : `Content already indexed (checksum match). No duplicates stored.`,
-              },
-            ],
-            details: { inserted, chunks: chunks.length },
-          };
         },
       },
       { optional: true }
@@ -174,94 +185,96 @@ export default definePluginEntry({
           crossAgent: Type.Optional(Type.Boolean({ description: "Search across all agents" })),
         }),
         async execute(_toolCallId: string, params: any) {
-          await ensureInitialized();
-          const query = String(params.query ?? "").trim();
-          if (!query) {
-            return { content: [{ type: "text", text: "Error: query is required." }], details: {} };
-          }
-
-          let results = await hybridSearch(query, ollama!, db!, resolvedConfig, {
-            agentId: params.agentId ? String(params.agentId) : undefined,
-            memoryType: params.memoryType as MemoryType | undefined,
-            topK: params.topK ? Number(params.topK) : resolvedConfig.topK,
-            crossAgent: Boolean(params.crossAgent),
-          });
-
-          // Fallback to archive search if active results are sparse (< 2)
-          if (results.length < 2) {
-            const topK = params.topK ? Number(params.topK) : resolvedConfig.topK;
-            const embedding = await ollama!.embed(query);
-            const [vectorArchive, ftsArchive] = await Promise.all([
-              db!.searchArchive(embedding, topK * 2, params.agentId ? String(params.agentId) : undefined, params.memoryType as MemoryType | undefined),
-              db!.fullTextSearchArchive(query, topK, params.agentId ? String(params.agentId) : undefined, params.memoryType as MemoryType | undefined),
-            ]);
-            const scoreMap = new Map<string, typeof vectorArchive[0] & { hybridScore: number }>();
-            for (const r of vectorArchive) {
-              scoreMap.set(r.id, { ...r, hybridScore: r.score * 0.6 });
+          try {
+            await ensureInitialized();
+            const query = String(params.query ?? "").trim();
+            if (!query) {
+              return { content: [{ type: "text", text: "Error: query is required." }], details: {} };
             }
-            for (const r of ftsArchive) {
-              const existing = scoreMap.get(r.id);
-              if (existing) {
-                existing.hybridScore += r.score * 0.4;
-              } else {
-                scoreMap.set(r.id, { ...r, hybridScore: r.score * 0.4 });
+
+            let results = await hybridSearch(query, ollama!, db!, resolvedConfig, {
+              agentId: params.agentId ? String(params.agentId) : undefined,
+              memoryType: params.memoryType as MemoryType | undefined,
+              topK: params.topK ? Number(params.topK) : resolvedConfig.topK,
+              crossAgent: Boolean(params.crossAgent),
+            });
+
+            // Fallback to archive search if active results are sparse (< 2)
+            if (results.length < 2) {
+              const topK = params.topK ? Number(params.topK) : resolvedConfig.topK;
+              const embedding = await ollama!.embed(query);
+              const [vectorArchive, ftsArchive] = await Promise.all([
+                db!.searchArchive(embedding, topK * 2, params.agentId ? String(params.agentId) : undefined, params.memoryType as MemoryType | undefined),
+                db!.fullTextSearchArchive(query, topK, params.agentId ? String(params.agentId) : undefined, params.memoryType as MemoryType | undefined),
+              ]);
+              const scoreMap = new Map<string, typeof vectorArchive[0] & { hybridScore: number }>();
+              for (const r of vectorArchive) {
+                scoreMap.set(r.id, { ...r, hybridScore: r.score * 0.6 });
               }
-            }
-            const archiveResults = Array.from(scoreMap.values()).sort((a, b) => b.hybridScore - a.hybridScore).slice(0, topK);
-            if (archiveResults.length > 0) {
-              // Mark archive results so user knows they're from older storage
-              const activeIds = new Set(results.map(r => r.id));
-              for (const ar of archiveResults) {
-                if (!activeIds.has(ar.id)) {
-                  results.push({
-                    id: ar.id,
-                    agentId: ar.agentId,
-                    sessionId: ar.sessionId,
-                    content: ar.content,
-                    memoryType: ar.memoryType,
-                    createdAt: ar.createdAt,
-                    sourcePath: ar.sourcePath,
-                    tags: ar.tags,
-                    score: ar.hybridScore,
-                    priority: ar.priority,
-                    expiresAt: ar.expiresAt,
-                  } as any);
+              for (const r of ftsArchive) {
+                const existing = scoreMap.get(r.id);
+                if (existing) {
+                  existing.hybridScore += r.score * 0.4;
+                } else {
+                  scoreMap.set(r.id, { ...r, hybridScore: r.score * 0.4 });
+                }
+              }
+              const archiveResults = Array.from(scoreMap.values()).sort((a, b) => b.hybridScore - a.hybridScore).slice(0, topK);
+              if (archiveResults.length > 0) {
+                const activeIds = new Set(results.map(r => r.id));
+                for (const ar of archiveResults) {
+                  if (!activeIds.has(ar.id)) {
+                    results.push({
+                      id: ar.id,
+                      agentId: ar.agentId,
+                      sessionId: ar.sessionId,
+                      content: ar.content,
+                      memoryType: ar.memoryType,
+                      createdAt: ar.createdAt,
+                      sourcePath: ar.sourcePath,
+                      tags: ar.tags,
+                      score: ar.hybridScore,
+                      priority: ar.priority,
+                      expiresAt: ar.expiresAt,
+                    } as any);
+                  }
                 }
               }
             }
-          }
 
-          if (results.length === 0) {
+            if (results.length === 0) {
+              return {
+                content: [{ type: "text", text: "No results found." }],
+                details: { count: 0 },
+              };
+            }
+
+            const archiveIds = new Set(
+              results
+                .filter(r => r.expiresAt > 0 && r.createdAt < Date.now() - 90 * 86400 * 1000)
+                .map(r => r.id)
+            );
+
+            const formatted = results
+              .map(
+                (r, i) => {
+                  const fromArchive = archiveIds.has(r.id) ? " [archived]" : "";
+                  return `${i + 1}. [${r.memoryType}]${fromArchive} [score=${r.score.toFixed(3)}] ${r.content.slice(0, 300)}${r.content.length > 300 ? "…" : ""}`;
+                }
+              )
+              .join("\n\n");
+
+            const archivedCount = results.filter(r => archiveIds.has(r.id)).length;
+            const archiveNote = archivedCount > 0 ? `(Includes ${archivedCount} archived memory\n\n)` : "";
+
             return {
-              content: [{ type: "text", text: "No results found." }],
-              details: { count: 0 },
+              content: [{ type: "text", text: `Found ${results.length} result(s)${archivedCount > 0 ? ` (including ${archivedCount} archived)` : ""}:\n\n${archiveNote}${formatted}` }],
+              details: { count: results.length, results },
             };
+          } catch (err) {
+            logError("noesis_search failed", { error: err, tool: "noesis_search", agentId: params.agentId ? String(params.agentId) : undefined });
+            throw err;
           }
-
-          // Track which results actually came from the archive (by checking expiresAt > 0
-          // AND createdAt is older than 90 days — only archived entries have both conditions)
-          const archiveIds = new Set(
-            results
-              .filter(r => r.expiresAt > 0 && r.createdAt < Date.now() - 90 * 86400 * 1000)
-              .map(r => r.id)
-          );
-
-          const formatted = results
-            .map(
-              (r, i) => {
-                const fromArchive = archiveIds.has(r.id) ? " [archived]" : "";
-                return `${i + 1}. [${r.memoryType}]${fromArchive} [score=${r.score.toFixed(3)}] ${r.content.slice(0, 300)}${r.content.length > 300 ? "…" : ""}`;
-              }
-            )
-            .join("\n\n");
-
-          const archivedCount = results.filter(r => archiveIds.has(r.id)).length;
-          const archiveNote = archivedCount > 0 ? `(Includes ${archivedCount} archived memory\n\n)` : "";
-
-          return {
-            content: [{ type: "text", text: `Found ${results.length} result(s)${archivedCount > 0 ? ` (including ${archivedCount} archived)` : ""}:\n\n${archiveNote}${formatted}` }],
-            details: { count: results.length, results },
-          };
         },
       },
       { optional: true }
@@ -371,50 +384,55 @@ export default definePluginEntry({
           ),
         }),
         async execute(_toolCallId: string, params: any) {
-          await ensureInitialized();
+          try {
+            await ensureInitialized();
 
-          const logLines: string[] = [];
-          const log = (msg: string) => {
-            api.logger.info(msg);
-            logLines.push(msg);
-          };
+            const logLines: string[] = [];
+            const log = (msg: string) => {
+              api.logger.info(msg);
+              logLines.push(msg);
+            };
 
-          if (params.agentId) {
-            const result = await importMarkdownFiles(
-              String(params.agentId),
-              db!,
-              ollama!,
-              resolvedConfig,
-              log
-            );
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Import complete for '${result.agentId}': ${result.indexed} indexed, ${result.skipped} skipped, ${result.errors} errors`,
-                },
-              ],
-              details: result,
-            };
-          } else {
-            const results = await importAllAgents(db!, ollama!, resolvedConfig, log);
-            const totals = results.reduce(
-              (acc, r) => ({
-                indexed: acc.indexed + r.indexed,
-                skipped: acc.skipped + r.skipped,
-                errors: acc.errors + r.errors,
-              }),
-              { indexed: 0, skipped: 0, errors: 0 }
-            );
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Import complete for ${results.length} agent(s): ${totals.indexed} indexed, ${totals.skipped} skipped, ${totals.errors} errors`,
-                },
-              ],
-              details: { agents: results, totals },
-            };
+            if (params.agentId) {
+              const result = await importMarkdownFiles(
+                String(params.agentId),
+                db!,
+                ollama!,
+                resolvedConfig,
+                log
+              );
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `Import complete for '${result.agentId}': ${result.indexed} indexed, ${result.skipped} skipped, ${result.errors} errors`,
+                  },
+                ],
+                details: result,
+              };
+            } else {
+              const results = await importAllAgents(db!, ollama!, resolvedConfig, log);
+              const totals = results.reduce(
+                (acc, r) => ({
+                  indexed: acc.indexed + r.indexed,
+                  skipped: acc.skipped + r.skipped,
+                  errors: acc.errors + r.errors,
+                }),
+                { indexed: 0, skipped: 0, errors: 0 }
+              );
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `Import complete for ${results.length} agent(s): ${totals.indexed} indexed, ${totals.skipped} skipped, ${totals.errors} errors`,
+                  },
+                ],
+                details: { agents: results, totals },
+              };
+            }
+          } catch (err) {
+            logError("noesis_import failed", { error: err, tool: "noesis_import", agentId: params.agentId ? String(params.agentId) : undefined });
+            throw err;
           }
         },
       },
@@ -473,16 +491,21 @@ export default definePluginEntry({
           id: Type.String({ description: "Entry ID to delete" }),
         }),
         async execute(_toolCallId: string, params: any) {
-          await ensureInitialized();
-          const id = String(params.id ?? "").trim();
-          if (!id) {
-            return { content: [{ type: "text", text: "Error: id is required." }], details: {} };
+          try {
+            await ensureInitialized();
+            const id = String(params.id ?? "").trim();
+            if (!id) {
+              return { content: [{ type: "text", text: "Error: id is required." }], details: {} };
+            }
+            await db!.deleteById(id);
+            return {
+              content: [{ type: "text", text: `Deleted entry ${id}` }],
+              details: {},
+            };
+          } catch (err) {
+            logError("noesis_delete failed", { error: err, tool: "noesis_delete", agentId: undefined });
+            throw err;
           }
-          await db!.deleteById(id);
-          return {
-            content: [{ type: "text", text: `Deleted entry ${id}` }],
-            details: {},
-          };
         },
       },
       { optional: true }
@@ -496,11 +519,150 @@ export default definePluginEntry({
         description: "Move all expired entries from the active table to the archive table. Expired = TTL reached. Archived entries are no longer in active search but can be retrieved with noesis_search_archive.",
         parameters: Type.Object({}),
         async execute(_toolCallId: string, _params: any) {
+          try {
+            await ensureInitialized();
+            const archived = await db!.archiveExpired();
+            return {
+              content: [{ type: "text", text: `Archived ${archived} expired entries to long-term storage.` }],
+              details: { archived },
+            };
+          } catch (err) {
+            logError("noesis_cleanup failed", { error: err, tool: "noesis_cleanup" });
+            throw err;
+          }
+        },
+      },
+      { optional: true }
+    );
+
+    // ── Tool: noesis_dedup ─────────────────────────────────────────────
+    api.registerTool(
+      {
+        name: "noesis_dedup",
+        label: "Noesis Dedup",
+        description:
+          "Find near-duplicate memory entries using semantic similarity. Computes embeddings for a sample of entries and finds pairs above the similarity threshold. Returns duplicate groups — you decide which to keep or delete. Sample is capped at 200 entries for performance.",
+        parameters: Type.Object({
+          threshold: Type.Optional(
+            Type.Number({
+              description: "Cosine similarity threshold 0.7–0.99. Higher = stricter match. Default: 0.9",
+            })
+          ),
+          agentId: Type.Optional(Type.String({ description: "Scope dedup to a specific agent" })),
+          memoryType: Type.Optional(
+            Type.Union([
+              Type.Literal("fact"),
+              Type.Literal("decision"),
+              Type.Literal("preference"),
+              Type.Literal("context"),
+              Type.Literal("session"),
+            ])
+          ),
+          limit: Type.Optional(
+            Type.Number({ description: "Max duplicate pairs to return. Default: 50." })
+          ),
+        }),
+        async execute(_toolCallId: string, params: any) {
           await ensureInitialized();
-          const archived = await db!.archiveExpired();
+          const threshold = Math.min(0.99, Math.max(0.7, Number(params.threshold ?? 0.9)));
+          const agentId = params.agentId ? String(params.agentId) : undefined;
+          const memoryType = params.memoryType as MemoryType | undefined;
+          const maxPairs = Math.min(200, Number(params.limit ?? 50));
+          const SAMPLE_SIZE = 200;
+
+          // 1. Fetch a random sample of entries from DB
+          const allEntries = await db!.exportAll(agentId, memoryType);
+          const now = Date.now();
+          const active = allEntries.filter((e) => e.expiresAt === 0 || e.expiresAt > now);
+
+          // Shuffle and cap
+          const shuffled = active.sort(() => Math.random() - 0.5);
+          const sample = shuffled.slice(0, SAMPLE_SIZE);
+
+          if (sample.length < 2) {
+            return {
+              content: [{ type: "text", text: "Not enough entries to compare. Need at least 2." }],
+              details: { checked: 0, duplicates: 0 },
+            };
+          }
+
+          // 2. Re-embed all sample content
+          const texts = sample.map((e) => e.content);
+          const embeddings = await ollama!.embedBatch(texts);
+
+          // 3. Pairwise similarity — O(N²), capped at SAMPLE_SIZE=200 → 19,900 comparisons
+          const duplicatePairs: Array<{
+            idA: string;
+            idB: string;
+            contentA: string;
+            contentB: string;
+            score: number;
+            agentId: string;
+            memoryType: string;
+          }> = [];
+
+          for (let i = 0; i < sample.length; i++) {
+            for (let j = i + 1; j < sample.length; j++) {
+              const sim = cosineSimilarityDense(embeddings[i], embeddings[j]);
+              if (sim >= threshold) {
+                duplicatePairs.push({
+                  idA: sample[i].id,
+                  idB: sample[j].id,
+                  contentA: sample[i].content.slice(0, 150),
+                  contentB: sample[j].content.slice(0, 150),
+                  score: sim,
+                  agentId: sample[i].agentId,
+                  memoryType: sample[i].memoryType,
+                });
+                if (duplicatePairs.length >= maxPairs) break;
+              }
+            }
+            if (duplicatePairs.length >= maxPairs) break;
+          }
+
+          if (duplicatePairs.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Checked ${sample.length} entries (${active.length} total active). No duplicate pairs found above threshold ${threshold}.`,
+                },
+              ],
+              details: { checked: sample.length, total: active.length, duplicates: 0, threshold },
+            };
+          }
+
+          const lines = [
+            `Found ${duplicatePairs.length} duplicate pair(s) above threshold ${threshold}:`,
+            `(checked ${sample.length} of ${active.length} active entries — sample is capped at 200)`,
+            ``,
+          ];
+
+          for (let i = 0; i < duplicatePairs.length; i++) {
+            const d = duplicatePairs[i];
+            lines.push(
+              `─── Pair ${i + 1} [similarity: ${d.score.toFixed(4)}] ───`,
+              `[${d.memoryType}] ${d.agentId}`,
+              `A (${d.idA}): ${d.contentA}${d.contentA.length >= 150 ? "…" : ""}`,
+              `B (${d.idB}): ${d.contentB}${d.contentB.length >= 150 ? "…" : ""}`,
+              ``
+            );
+          }
+
+          lines.push(
+            `To delete a duplicate, use noesis_delete with its ID.`,
+            `Tip: lower the threshold (e.g. 0.85) to catch looser duplicates, or raise it to 0.95+ for near-identical only.`
+          );
+
           return {
-            content: [{ type: "text", text: `Archived ${archived} expired entries to long-term storage.` }],
-            details: { archived },
+            content: [{ type: "text", text: lines.join("\n") }],
+            details: {
+              checked: sample.length,
+              total: active.length,
+              duplicates: duplicatePairs.length,
+              threshold,
+              pairs: duplicatePairs,
+            },
           };
         },
       },
@@ -519,19 +681,24 @@ export default definePluginEntry({
           includeExpired: Type.Optional(Type.Boolean({ description: "Include expired entries. Default: false" })),
         }),
         async execute(_toolCallId: string, params: any) {
-          await ensureInitialized();
-          const agentId = params.agentId ? String(params.agentId) : undefined;
-          const memoryType = params.memoryType ? String(params.memoryType) : undefined;
-          const includeExpired = Boolean(params.includeExpired ?? false);
-          const all = await db!.exportAll(agentId, memoryType);
-          const now = Date.now();
-          const entries = includeExpired
-            ? all
-            : all.filter((e) => e.expiresAt === 0 || e.expiresAt > now);
-          return {
-            content: [{ type: "text", text: JSON.stringify(entries, null, 2) }],
-            details: { count: entries.length, total: all.length },
-          };
+          try {
+            await ensureInitialized();
+            const agentId = params.agentId ? String(params.agentId) : undefined;
+            const memoryType = params.memoryType ? String(params.memoryType) : undefined;
+            const includeExpired = Boolean(params.includeExpired ?? false);
+            const all = await db!.exportAll(agentId, memoryType);
+            const now = Date.now();
+            const entries = includeExpired
+              ? all
+              : all.filter((e) => e.expiresAt === 0 || e.expiresAt > now);
+            return {
+              content: [{ type: "text", text: JSON.stringify(entries, null, 2) }],
+              details: { count: entries.length, total: all.length },
+            };
+          } catch (err) {
+            logError("noesis_export failed", { error: err, tool: "noesis_export", agentId: params.agentId ? String(params.agentId) : undefined });
+            throw err;
+          }
         },
       },
       { optional: true }
@@ -549,18 +716,23 @@ export default definePluginEntry({
           ttlDays: Type.Optional(Type.Number({ description: "New TTL in days. 0 = never expire. Overrides expiresAt." })),
         }),
         async execute(_toolCallId: string, params: any) {
-          await ensureInitialized();
-          const id = String(params.id ?? "").trim();
-          if (!id) return { content: [{ type: "text", text: "Error: id is required." }], details: {} };
-          const priority = params.priority !== undefined ? Math.min(100, Math.max(0, Number(params.priority))) : undefined;
-          const ttlDays = params.ttlDays !== undefined ? Number(params.ttlDays) : undefined;
-          const expiresAt = ttlDays !== undefined ? (ttlDays > 0 ? Date.now() + ttlDays * 86400 * 1000 : 0) : undefined;
-          const updated = await db!.updateEntry(id, { priority, expiresAt });
-          if (!updated) return { content: [{ type: "text", text: `Entry ${id} not found.` }], details: {} };
-          return {
-            content: [{ type: "text", text: `Updated entry ${id}${priority !== undefined ? `, priority=${priority}` : ""}${ttlDays !== undefined ? `, ttlDays=${ttlDays}` : ""}` }],
-            details: { id, priority: priority ?? updated.priority, expiresAt: expiresAt ?? updated.expiresAt },
-          };
+          try {
+            await ensureInitialized();
+            const id = String(params.id ?? "").trim();
+            if (!id) return { content: [{ type: "text", text: "Error: id is required." }], details: {} };
+            const priority = params.priority !== undefined ? Math.min(100, Math.max(0, Number(params.priority))) : undefined;
+            const ttlDays = params.ttlDays !== undefined ? Number(params.ttlDays) : undefined;
+            const expiresAt = ttlDays !== undefined ? (ttlDays > 0 ? Date.now() + ttlDays * 86400 * 1000 : 0) : undefined;
+            const updated = await db!.updateEntry(id, { priority, expiresAt });
+            if (!updated) return { content: [{ type: "text", text: `Entry ${id} not found.` }], details: {} };
+            return {
+              content: [{ type: "text", text: `Updated entry ${id}${priority !== undefined ? `, priority=${priority}` : ""}${ttlDays !== undefined ? `, ttlDays=${ttlDays}` : ""}` }],
+              details: { id, priority: priority ?? updated.priority, expiresAt: expiresAt ?? updated.expiresAt },
+            };
+          } catch (err) {
+            logError("noesis_set_priority failed", { error: err, tool: "noesis_set_priority" });
+            throw err;
+          }
         },
       },
       { optional: true }
@@ -895,35 +1067,73 @@ export default definePluginEntry({
 // ─── initialization ────────────────────────────────────────────────────────
 
 async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Promise<void> {
+  // Set up dedicated error logging first — before anything else
+  configureErrorLog(config.errorLogPath);
+  installGlobalErrorHandlers();
+  log(`[noesis] Error log: ${config.errorLogPath}`);
+
   // 1. Connect to LanceDB
-  db = new NoesisDB(config);
+  try {
+    db = new NoesisDB(config);
+  } catch (err) {
+    logError("Failed to initialize NoesisDB", { error: err });
+    throw err;
+  }
 
   // 2. Auto-configure Ollama
-  ollama = await autoConfigOllama(config.ollamaEndpoint, config.embeddingModel, log);
+  try {
+    ollama = await autoConfigOllama(config.ollamaEndpoint, config.embeddingModel, log);
+  } catch (err) {
+    logError("Failed to auto-configure Ollama", { error: err });
+    throw err;
+  }
 
   // Get embedding dimension for schema
-  const testEmbed = await ollama.embed("noesis init");
-  const embeddingDim = testEmbed.length;
+  let embeddingDim: number;
+  try {
+    const testEmbed = await ollama.embed("noesis init");
+    embeddingDim = testEmbed.length;
+  } catch (err) {
+    logError("Failed to get embedding dimension from Ollama", { error: err });
+    throw err;
+  }
 
-  await db.connect(embeddingDim);
-  log(`[noesis] LanceDB connected (${embeddingDim}d embeddings, path: ${config.lanceDbPath})`);
+  try {
+    await db.connect(embeddingDim);
+    log(`[noesis] LanceDB connected (${embeddingDim}d embeddings, path: ${config.lanceDbPath})`);
+  } catch (err) {
+    logError("Failed to connect to LanceDB", { error: err });
+    throw err;
+  }
 
   initialized = true;
 
   // 3. Optional: auto-migrate on startup
   if (config.autoMigrate) {
     log("[noesis] autoMigrate enabled — importing markdown memory files...");
-    await importAllAgents(db, ollama, config, log);
+    try {
+      await importAllAgents(db, ollama, config, log);
+    } catch (err) {
+      logError("Auto-migrate failed", { error: err, extra: { autoMigrate: true } });
+    }
   }
 
   // 4. Optional: watch QMD sessions
   if (config.indexQmdSessions) {
-    watcher = startQmdWatcher(db, ollama, config, log);
+    try {
+      watcher = startQmdWatcher(db, ollama, config, log);
+    } catch (err) {
+      logError("Failed to start QMD session watcher", { error: err, extra: { indexQmdSessions: true } });
+    }
   }
 
   // 5. Optional: watch agent memory dirs
   if (config.watchMemoryDirs) {
-    memoryWatcher = startMemoryWatcher(db, ollama, config, log);
+    try {
+      memoryWatcher = startMemoryWatcher(db, ollama, config, log);
+    } catch (err) {
+      logError("Failed to start memory dir watcher", { error: err, extra: { watchMemoryDirs: true } });
+    }
   }
 
   // 6. Optional: auto-cleanup expired entries on startup
@@ -933,6 +1143,7 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
       if (archived > 0) log(`[noesis] Archived ${archived} expired entries.`);
     } catch (err) {
       log(`[noesis] Cleanup skipped: ${err}`);
+      logError("Startup cleanup failed", { error: err, extra: { autoCleanup: true } });
     }
   }
 
@@ -940,13 +1151,17 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
   if (config.cleanupIntervalHours > 0) {
     const intervalMs = config.cleanupIntervalHours * 60 * 60 * 1000;
     cleanupIntervalId = setInterval(() => {
-      db.archiveExpired()
+      db!.archiveExpired()
         .then((n) => { if (n > 0) log(`[noesis] Periodic cleanup archived ${n} entries.`); })
-        .catch((err) => log(`[noesis] Periodic cleanup error: ${err}`));
+        .catch((err) => {
+          log(`[noesis] Periodic cleanup error: ${err}`);
+          logError("Periodic cleanup failed", { error: err, extra: { cleanupIntervalHours: config.cleanupIntervalHours } });
+        });
     }, intervalMs);
     log(`[noesis] Periodic cleanup scheduled every ${config.cleanupIntervalHours}h`);
   }
 
+  initialized = true;
   log("[noesis] Initialization complete.");
 }
 
@@ -987,5 +1202,6 @@ function buildConfig(raw: Record<string, unknown>): NoesisConfig {
     assembleInjectPriority: Number(raw.assembleInjectPriority ?? DEFAULT_CONFIG.assembleInjectPriority),
     assembleMaxEntries: Number(raw.assembleMaxEntries ?? DEFAULT_CONFIG.assembleMaxEntries),
     assembleMaxAgeDays: Number(raw.assembleMaxAgeDays ?? DEFAULT_CONFIG.assembleMaxAgeDays),
+    errorLogPath: String(raw.errorLogPath ?? DEFAULT_CONFIG.errorLogPath),
   };
 }

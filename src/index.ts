@@ -16,7 +16,7 @@ import fs from "fs";
 import { DEFAULT_CONFIG, MemoryEntry, MemoryType, NoesisConfig } from "./types.js";
 import { autoConfigOllama, OllamaClient, contentChecksum, chunkText } from "./ollama.js";
 import { NoesisDB } from "./lancedb.js";
-import { hybridSearch } from "./search.js";
+import { hybridSearch, cosineSimilarityDense } from "./search.js";
 import { importMarkdownFiles, importAllAgents } from "./migrator.js";
 import { startQmdWatcher, SessionWatcher, startMemoryWatcher } from "./watcher.js";
 
@@ -501,6 +501,140 @@ export default definePluginEntry({
           return {
             content: [{ type: "text", text: `Archived ${archived} expired entries to long-term storage.` }],
             details: { archived },
+          };
+        },
+      },
+      { optional: true }
+    );
+
+    // ── Tool: noesis_dedup ─────────────────────────────────────────────
+    api.registerTool(
+      {
+        name: "noesis_dedup",
+        label: "Noesis Dedup",
+        description:
+          "Find near-duplicate memory entries using semantic similarity. Computes embeddings for a sample of entries and finds pairs above the similarity threshold. Returns duplicate groups — you decide which to keep or delete. Sample is capped at 200 entries for performance.",
+        parameters: Type.Object({
+          threshold: Type.Optional(
+            Type.Number({
+              description: "Cosine similarity threshold 0.7–0.99. Higher = stricter match. Default: 0.9",
+            })
+          ),
+          agentId: Type.Optional(Type.String({ description: "Scope dedup to a specific agent" })),
+          memoryType: Type.Optional(
+            Type.Union([
+              Type.Literal("fact"),
+              Type.Literal("decision"),
+              Type.Literal("preference"),
+              Type.Literal("context"),
+              Type.Literal("session"),
+            ])
+          ),
+          limit: Type.Optional(
+            Type.Number({ description: "Max duplicate pairs to return. Default: 50." })
+          ),
+        }),
+        async execute(_toolCallId: string, params: any) {
+          await ensureInitialized();
+          const threshold = Math.min(0.99, Math.max(0.7, Number(params.threshold ?? 0.9)));
+          const agentId = params.agentId ? String(params.agentId) : undefined;
+          const memoryType = params.memoryType as MemoryType | undefined;
+          const maxPairs = Math.min(200, Number(params.limit ?? 50));
+          const SAMPLE_SIZE = 200;
+
+          // 1. Fetch a random sample of entries from DB
+          const allEntries = await db!.exportAll(agentId, memoryType);
+          const now = Date.now();
+          const active = allEntries.filter((e) => e.expiresAt === 0 || e.expiresAt > now);
+
+          // Shuffle and cap
+          const shuffled = active.sort(() => Math.random() - 0.5);
+          const sample = shuffled.slice(0, SAMPLE_SIZE);
+
+          if (sample.length < 2) {
+            return {
+              content: [{ type: "text", text: "Not enough entries to compare. Need at least 2." }],
+              details: { checked: 0, duplicates: 0 },
+            };
+          }
+
+          // 2. Re-embed all sample content
+          const texts = sample.map((e) => e.content);
+          const embeddings = await ollama!.embedBatch(texts);
+
+          // 3. Pairwise similarity — O(N²), capped at SAMPLE_SIZE=200 → 19,900 comparisons
+          const duplicatePairs: Array<{
+            idA: string;
+            idB: string;
+            contentA: string;
+            contentB: string;
+            score: number;
+            agentId: string;
+            memoryType: string;
+          }> = [];
+
+          for (let i = 0; i < sample.length; i++) {
+            for (let j = i + 1; j < sample.length; j++) {
+              const sim = cosineSimilarityDense(embeddings[i], embeddings[j]);
+              if (sim >= threshold) {
+                duplicatePairs.push({
+                  idA: sample[i].id,
+                  idB: sample[j].id,
+                  contentA: sample[i].content.slice(0, 150),
+                  contentB: sample[j].content.slice(0, 150),
+                  score: sim,
+                  agentId: sample[i].agentId,
+                  memoryType: sample[i].memoryType,
+                });
+                if (duplicatePairs.length >= maxPairs) break;
+              }
+            }
+            if (duplicatePairs.length >= maxPairs) break;
+          }
+
+          if (duplicatePairs.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Checked ${sample.length} entries (${active.length} total active). No duplicate pairs found above threshold ${threshold}.`,
+                },
+              ],
+              details: { checked: sample.length, total: active.length, duplicates: 0, threshold },
+            };
+          }
+
+          const lines = [
+            `Found ${duplicatePairs.length} duplicate pair(s) above threshold ${threshold}:`,
+            `(checked ${sample.length} of ${active.length} active entries — sample is capped at 200)`,
+            ``,
+          ];
+
+          for (let i = 0; i < duplicatePairs.length; i++) {
+            const d = duplicatePairs[i];
+            lines.push(
+              `─── Pair ${i + 1} [similarity: ${d.score.toFixed(4)}] ───`,
+              `[${d.memoryType}] ${d.agentId}`,
+              `A (${d.idA}): ${d.contentA}${d.contentA.length >= 150 ? "…" : ""}`,
+              `B (${d.idB}): ${d.contentB}${d.contentB.length >= 150 ? "…" : ""}`,
+              ``
+            );
+          }
+
+          lines.push(
+            `To delete a duplicate, use noesis_delete with its ID.`,
+            `Tip: lower the threshold (e.g. 0.85) to catch looser duplicates, or raise it to 0.95+ for near-identical only.`
+          );
+
+          return {
+            content: [{ type: "text", text: lines.join("\n") }],
+            details: {
+              checked: sample.length,
+              total: active.length,
+              duplicates: duplicatePairs.length,
+              threshold,
+              pairs: duplicatePairs,
+            },
           };
         },
       },

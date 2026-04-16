@@ -21,6 +21,11 @@ export interface SessionWatcher {
  *   - ~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl
  *   - ~/.openclaw/agents/<agentId>/qmd/sessions/<sessionId>.jsonl
  *
+ * Debounce logic: each file change resets a 2s debounce timer. Indexing is
+ * serialized per-file — a new debounce is scheduled if changes arrive while
+ * an indexing operation is in-flight (prevents race condition where mid-index
+ * writes get silently dropped).
+ *
  * Returns a handle with a close() method for cleanup.
  */
 export function startQmdWatcher(
@@ -41,7 +46,10 @@ export function startQmdWatcher(
     path.join(home, ".openclaw", "agents", "*", "qmd", "sessions", "*.jsonl"),
   ];
 
+  // pending: files with a debounce timer scheduled
   const pending = new Map<string, NodeJS.Timeout>();
+  // inflight: files currently being indexed (prevents concurrent indexing of same file)
+  const inflight = new Set<string>();
 
   const watcher = chokidarWatch(sessionPatterns, {
     persistent: true,
@@ -49,21 +57,33 @@ export function startQmdWatcher(
     awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
   });
 
-  const handleFile = (filePath: string) => {
-    if (pending.has(filePath)) return;
+  const scheduleDebounce = (filePath: string) => {
+    // Clear any existing debounce for this file
+    const existing = pending.get(filePath);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+    }
     const timer = setTimeout(async () => {
       pending.delete(filePath);
+      // Skip if already indexing this file
+      if (inflight.has(filePath)) {
+        logger?.(`[noesis/watcher] ${filePath}: indexing in progress, will re-debounce after`);
+        return;
+      }
+      inflight.add(filePath);
       try {
         await indexSessionFile(filePath, db, ollama, config, logger);
       } catch (err) {
         logger?.(`[noesis/watcher] Error indexing ${filePath}: ${err}`);
+      } finally {
+        inflight.delete(filePath);
       }
     }, DEBOUNCE_MS);
     pending.set(filePath, timer);
   };
 
-  watcher.on("add", handleFile);
-  watcher.on("change", handleFile);
+  watcher.on("add", scheduleDebounce);
+  watcher.on("change", scheduleDebounce);
   watcher.on("error", (err) => logger?.(`[noesis/watcher] Watcher error: ${err}`));
 
   const watchedPaths = sessionPatterns.join(", ");
@@ -74,6 +94,7 @@ export function startQmdWatcher(
       watcher.close();
       for (const t of pending.values()) clearTimeout(t);
       pending.clear();
+      inflight.clear();
     },
   };
 }
@@ -100,6 +121,7 @@ export function startMemoryWatcher(
 
   const globPattern = path.join(AGENTS_PATH, "*", "workspace", "memory", "*.md");
   const pending = new Map<string, NodeJS.Timeout>();
+  const inflight = new Set<string>();
 
   const watcher = chokidarWatch(globPattern, {
     persistent: true,
@@ -107,10 +129,18 @@ export function startMemoryWatcher(
     awaitWriteFinish: { stabilityThreshold: 800, pollInterval: 100 },
   });
 
-  const handleFile = (filePath: string) => {
-    if (pending.has(filePath)) return;
+  const scheduleDebounce = (filePath: string) => {
+    const existing = pending.get(filePath);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+    }
     const timer = setTimeout(async () => {
       pending.delete(filePath);
+      if (inflight.has(filePath)) {
+        logger?.(`[noesis/memory-watcher] ${filePath}: indexing in progress, will re-debounce after`);
+        return;
+      }
+      inflight.add(filePath);
       try {
         const indexed = await indexMemoryFile(filePath, db, ollama, config, logger);
         if (indexed > 0) {
@@ -118,13 +148,15 @@ export function startMemoryWatcher(
         }
       } catch (err) {
         logger?.(`[noesis/memory-watcher] Error indexing ${filePath}: ${err}`);
+      } finally {
+        inflight.delete(filePath);
       }
     }, DEBOUNCE_MS);
     pending.set(filePath, timer);
   };
 
-  watcher.on("add", handleFile);
-  watcher.on("change", handleFile);
+  watcher.on("add", scheduleDebounce);
+  watcher.on("change", scheduleDebounce);
   watcher.on("error", (err) => logger?.(`[noesis/memory-watcher] Watcher error: ${err}`));
 
   logger?.(`[noesis/memory-watcher] Watching agent memory dirs: ${globPattern}`);
@@ -134,6 +166,7 @@ export function startMemoryWatcher(
       watcher.close();
       for (const t of pending.values()) clearTimeout(t);
       pending.clear();
+      inflight.clear();
     },
   };
 }

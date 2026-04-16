@@ -433,6 +433,44 @@ Memory slot integration means OpenClaw's auto-recall loop calls `memory_search` 
 
 ---
 
+## CI/CD
+
+Noesis uses a two-workflow setup for automatic versioning and releases. Works with branch protection rules (requires PR to merge).
+
+**`version-bump.yml`** — triggered on PR lifecycle events (opened, synchronize, labeled, etc.)
+- Bumps version on PR branch using inline Node.js script
+- No third-party action dependency
+- Default: patch bump
+
+**`release.yml`** — triggered on push to `main`
+- Builds the project (`npm ci && npm run build`)
+- Publishes to npm (trusted publisher OIDC — no token needed)
+- Creates GitHub Release
+
+Flow: PR merge to `main` → release workflow fires → build + publish + release.
+
+---
+
+## Bug Fixes & Improvements
+
+### Critical fixes
+- `queryByPriority` — query was built but never executed (toArray called on wrong object)
+- Deduplication in `indexMemoryFile` — broken logic (`seen.add` after `return false`, dedup never worked)
+- QMD session entries — always had `priority=0`, priority surfacing non-functional
+- `parseSessionPath` — wrong path index handling for `qmd/sessions/` pattern
+- Archive detection heuristic — incorrectly flagged active table entries as archived by age alone
+- Periodic cleanup interval — reference was local, leaked on hot reload
+- `memory_index` tool — `priority` and `ttlDays` params accepted but silently ignored
+
+### Hardening
+- SQL injection in all filter string interpolations — added `escapeFilterValue()` across all queries
+- `embedBatch` — single embedding failure crashed entire batch; now uses `Promise.allSettled` with zero-vector fallback
+- `watchMemoryDirs` default — corrected to `false` (was mismatched across schema/README/DEFAULT_CONFIG)
+- Session path parsing — corrected all path patterns and removed duplicate unreachable branches
+- Archive detection — rebuilt with explicit `archiveIds` set for correct tagging
+
+---
+
 ## License
 
 See [LICENSE.md](./LICENSE.md) for the full MIT license text.
@@ -440,5 +478,3 @@ See [LICENSE.md](./LICENSE.md) for the full MIT license text.
 ---
 
 *Built for the [OpenClaw](https://openclaw.ai) community. Feedback and PRs welcome.*
-test
-trigger version-bump workflow test

@@ -22,12 +22,21 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install deps
+        run: npm ci
+
       - name: Bump version
         id: bump
         run: |
           node scripts/bump-version.js
           VERSION=$(node -p "require('./package.json').version")
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Current version: $VERSION"
 
       - name: Push version bump to PR branch
         run: |

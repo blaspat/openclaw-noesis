@@ -23,13 +23,5 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Automated Version Bump
-        uses: phips28/gh-action-bump-version@master
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PACKAGE_FILENAME: "openclaw.plugin.json"
-        with:
-          minor-wording: "feat:,FEATURE:,feature:"
-          major-wording: "BREAKING:,MAJOR:"
-          patch-wording: "fix:,patch:,bug:,hotfix:"
-          commit-message: "chore: bump version to {{version}}"
+      - name: Bump version
+        run: ./scripts/bump-version.sh ${{ github.event.inputs.bump_type || 'patch' }}

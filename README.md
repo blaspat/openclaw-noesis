@@ -258,34 +258,6 @@ Both `memories` and `memories_archive` tables get IVF-PQ ANN indexes when they r
 | `memory_index` | Auto-index new content |
 | `memory_recall` | Cross-session recall |
 
----
-
-## Data Model
-
-### Active Table (`memories`)
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | string | UUID v4 |
-| `agentId` | string | "main", "agent007", etc. |
-| `sessionId` | string | OpenClaw session ID |
-| `content` | string | Full original text (lossless) |
-| `chunk` | string | Embedded chunk (for reference) |
-| `embedding` | float32[768/1024] | Vector from Ollama |
-| `memoryType` | string | fact/decision/preference/context/session |
-| `priority` | int64 | Priority 0–100. Auto-priority by type if not overridden. |
-| `expiresAt` | int64 | Unix ms. 0 = never. On expiry, moved to archive. |
-| `createdAt` | int64 | Unix timestamp (ms) |
-| `sourcePath` | string | Origin .md or QMD file path |
-| `checksum` | string | SHA-256(content+agentId) for dedup |
-| `tags` | string[] | Custom tags |
-
-### Archive Table (`memories_archive`)
-
-Same schema as active table. Entries live here after TTL expires. Searchable via `noesis_search_archive` or automatic fallback in `noesis_search`.
-
----
-
 ## Migrating Existing Memory Files
 
 If you have existing markdown memory files (`MEMORY.md`, `memory/*.md`), import them:

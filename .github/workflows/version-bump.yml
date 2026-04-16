@@ -52,6 +52,6 @@ jobs:
           git add package.json openclaw.plugin.json
           git diff --cached --stat
           git commit -m "chore: bump version" || echo "No changes to commit"
-          git push origin HEAD
+          git push origin ${{ github.event.pull_request.head.ref }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -11,14 +11,30 @@ concurrency:
 jobs:
   bump:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Bump version on PR
-        uses: fadi-quader-mox/pr-version-bump@v1.0.0
-        with:
+      - name: Bump version
+        id: bump
+        run: |
+          node scripts/bump-version.js
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Push version bump to PR branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json openclaw.plugin.json
+          git commit -m "chore: bump version to v${{ steps.bump.outputs.VERSION }}"
+          git push origin ${{ github.event.pull_request.head.ref }}
+        env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          bump: patch

@@ -433,22 +433,6 @@ Memory slot integration means OpenClaw's auto-recall loop calls `memory_search` 
 
 ---
 
-## CI/CD
-
-Noesis uses a two-workflow setup for automatic versioning and releases. Works with branch protection rules (requires PR to merge).
-
-**`version-bump.yml`** — triggered on PR lifecycle events (opened, synchronize, labeled, etc.)
-- Bumps version on PR branch using inline Node.js script
-- No third-party action dependency
-- Default: patch bump
-
-**`release.yml`** — triggered on push to `main`
-- Builds the project (`npm ci && npm run build`)
-- Publishes to npm (trusted publisher OIDC — no token needed)
-- Creates GitHub Release
-
-Flow: PR merge to `main` → release workflow fires → build + publish + release.
-
 ---
 
 ## Bug Fixes & Improvements

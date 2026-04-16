@@ -80,10 +80,11 @@ QMD covers the basics well. Noesis builds on it with features for more structure
 openclaw plugins install clawhub:@blaspat/openclaw-noesis
 ```
 
-### 2. Set the memory slot
+### 2. Set the memory slot and context engine slot
 
 ```bash
 openclaw config set plugins.slots.memory noesis
+openclaw config set plugins.slots.contextEngine noesis
 ```
 
 Or edit your OpenClaw config:
@@ -432,6 +433,28 @@ Memory slot integration means OpenClaw's auto-recall loop calls `memory_search` 
 
 ---
 
+---
+
+## Bug Fixes & Improvements
+
+### Critical fixes
+- `queryByPriority` — query was built but never executed (toArray called on wrong object)
+- Deduplication in `indexMemoryFile` — broken logic (`seen.add` after `return false`, dedup never worked)
+- QMD session entries — always had `priority=0`, priority surfacing non-functional
+- `parseSessionPath` — wrong path index handling for `qmd/sessions/` pattern
+- Archive detection heuristic — incorrectly flagged active table entries as archived by age alone
+- Periodic cleanup interval — reference was local, leaked on hot reload
+- `memory_index` tool — `priority` and `ttlDays` params accepted but silently ignored
+
+### Hardening
+- SQL injection in all filter string interpolations — added `escapeFilterValue()` across all queries
+- `embedBatch` — single embedding failure crashed entire batch; now uses `Promise.allSettled` with zero-vector fallback
+- `watchMemoryDirs` default — corrected to `false` (was mismatched across schema/README/DEFAULT_CONFIG)
+- Session path parsing — corrected all path patterns and removed duplicate unreachable branches
+- Archive detection — rebuilt with explicit `archiveIds` set for correct tagging
+
+---
+
 ## License
 
 See [LICENSE.md](./LICENSE.md) for the full MIT license text.
@@ -439,5 +462,3 @@ See [LICENSE.md](./LICENSE.md) for the full MIT license text.
 ---
 
 *Built for the [OpenClaw](https://openclaw.ai) community. Feedback and PRs welcome.*
-test
-trigger version-bump workflow test

@@ -4,12 +4,6 @@ on:
   push:
     branches:
       - main
-  pull_request_target:
-    types: [opened, synchronize, edited, ready_for_review, labeled, reopened]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -20,9 +14,8 @@ env:
   REGISTRY_URL: "https://registry.npmjs.org"
 
 jobs:
-  version-bump:
+  release:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request_target'
     permissions:
       contents: write
 
@@ -67,14 +60,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  release:
-    needs: version-bump
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    permissions:
-      contents: write
-
-    steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:

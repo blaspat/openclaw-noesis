@@ -9,15 +9,12 @@ on:
       - synchronize
       - reopened
       - ready_for_review
-  # Also run when PR label changes (e.g. "autorelease" added)
-  pull_request_target:
-    branches:
-      - main
 
 concurrency:
-  # Only one bump workflow per PR — cancel in-flight runs
+  # Only one bump workflow per PR at a time
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  # Don't cancel — let it finish so the status check gets reported to the commit
+  # cancel-in-progress: true
 
 permissions:
   contents: write

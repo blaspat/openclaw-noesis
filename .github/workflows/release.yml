@@ -59,6 +59,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   release:
+    needs: bump
     runs-on: ubuntu-latest
 
     steps:

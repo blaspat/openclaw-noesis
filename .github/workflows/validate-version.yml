@@ -1,0 +1,108 @@
+name: "Validate Version"
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check-package-json:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Check package.json version
+        run: |
+          HEAD_VERSION=$(node -p "require('./package.json').version")
+          CONTENT=$(curl -s -H "Authorization: Bearer ${{ github.token }}" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/package.json?ref=${{ github.event.repository.default_branch }}" \
+            | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).content")
+          BASE_VERSION=$(echo "$CONTENT" | base64 -d | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).version")
+          
+          echo "PR version: $HEAD_VERSION"
+          echo "Main version: $BASE_VERSION"
+          
+          if [ "$HEAD_VERSION" = "$BASE_VERSION" ]; then
+            echo "❌ package.json version not bumped"
+            exit 1
+          fi
+          
+          IFS='.' read -r HA HB HC <<< "$HEAD_VERSION"
+          IFS='.' read -r BA BB BC <<< "$BASE_VERSION"
+          
+          # Strip leading zeros to force numeric (not octal/lexicographic) comparison
+          if (( ${HA#0} + 0 > ${BA#0} + 0 )) || \
+             (( ${HA#0} + 0 == ${BA#0} + 0 && ${HB#0} + 0 > ${BB#0} + 0 )) || \
+             (( ${HA#0} + 0 == ${BA#0} + 0 && ${HB#0} + 0 == ${BB#0} + 0 && ${HC#0} + 0 > ${BC#0} + 0 )); then
+            echo "PASS: package.json version bumped"
+          else
+            echo "FAIL: package.json version not bumped"
+            exit 1
+          fi
+
+  check-plugin-json:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Check openclaw.plugin.json version
+        run: |
+          HEAD_VERSION=$(node -p "require('./openclaw.plugin.json').version")
+          CONTENT=$(curl -s -H "Authorization: Bearer ${{ github.token }}" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/openclaw.plugin.json?ref=${{ github.event.repository.default_branch }}" \
+            | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).content")
+          BASE_VERSION=$(echo "$CONTENT" | base64 -d | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).version")
+          
+          echo "PR version: $HEAD_VERSION"
+          echo "Main version: $BASE_VERSION"
+          
+          if [ "$HEAD_VERSION" = "$BASE_VERSION" ]; then
+            echo "❌ openclaw.plugin.json version not bumped"
+            exit 1
+          fi
+          
+          IFS='.' read -r HA HB HC <<< "$HEAD_VERSION"
+          IFS='.' read -r BA BB BC <<< "$BASE_VERSION"
+          
+          # Strip leading zeros to force numeric (not octal/lexicographic) comparison
+          if (( ${HA#0} + 0 > ${BA#0} + 0 )) || \
+             (( ${HA#0} + 0 == ${BA#0} + 0 && ${HB#0} + 0 > ${BB#0} + 0 )) || \
+             (( ${HA#0} + 0 == ${BA#0} + 0 && ${HB#0} + 0 == ${BB#0} + 0 && ${HC#0} + 0 > ${BC#0} + 0 )); then
+            echo "PASS: openclaw.plugin.json version bumped"
+          else
+            echo "FAIL: openclaw.plugin.json version not bumped"
+            exit 1
+          fi
+
+  check-versions-match:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Check versions match
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          PLUGIN_VERSION=$(node -p "require('./openclaw.plugin.json').version")
+          
+          echo "package.json: $PKG_VERSION"
+          echo "openclaw.plugin.json: $PLUGIN_VERSION"
+          
+          if [ "$PKG_VERSION" = "$PLUGIN_VERSION" ]; then
+            echo "PASS: Versions match"
+          else
+            echo "FAIL: Versions do not match"
+            exit 1
+          fi

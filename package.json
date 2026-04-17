@@ -1,6 +1,6 @@
 {
   "name": "@blaspat/openclaw-noesis",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "Local-first semantic memory plugin for OpenClaw — LanceDB + Ollama, no cloud required.",
   "type": "module",
   "openclaw": {

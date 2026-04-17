@@ -6,19 +6,7 @@ on:
       - main
     types:
       - opened
-      - synchronize
       - reopened
-  workflow_dispatch:
-    inputs:
-      bump_type:
-        description: 'Version bump type'
-        required: true
-        default: 'patch'
-        type: choice
-        options:
-          - patch
-          - minor
-          - major
 
 permissions:
   contents: write
@@ -35,7 +23,9 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Bump version
-        run: bash scripts/bump-version.sh ${{ github.event.inputs.bump_type || 'patch' }}
+        run: |
+          NEW_VERSION=$(bash scripts/bump-version.sh patch)
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
       - name: Commit version bump
         run: |

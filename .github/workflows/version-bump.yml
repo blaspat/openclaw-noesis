@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   version-bump:
@@ -35,3 +36,20 @@ jobs:
           git add package.json openclaw.plugin.json
           git commit -m "chore: bump version to ${{ steps.bump.outputs.version }}"
           git push
+      
+      - name: Create check run
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'version-bump',
+              head_sha: context.payload.pull_request.head.sha,
+              status: 'completed',
+              conclusion: 'success',
+              output: {
+                title: 'Version bumped',
+                summary: 'Version was bumped to ${{ steps.bump.outputs.version }}'
+              }
+            });

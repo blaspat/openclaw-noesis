@@ -22,7 +22,7 @@ jobs:
       - name: Check package.json version
         run: |
           HEAD_VERSION=$(node -p "require('./package.json').version")
-          BASE_VERSION=$(git show main:package.json | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).version")
+          BASE_VERSION=$(git show ${{ github.event.repository.default_branch }}:package.json | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).version")
           
           echo "PR version: $HEAD_VERSION"
           echo "Main version: $BASE_VERSION"
@@ -71,7 +71,7 @@ jobs:
       - name: Check openclaw.plugin.json version
         run: |
           HEAD_VERSION=$(node -p "require('./openclaw.plugin.json').version")
-          BASE_VERSION=$(git show main:openclaw.plugin.json | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).version")
+          BASE_VERSION=$(git show ${{ github.event.repository.default_branch }}:openclaw.plugin.json | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).version")
           
           echo "PR version: $HEAD_VERSION"
           echo "Main version: $BASE_VERSION"

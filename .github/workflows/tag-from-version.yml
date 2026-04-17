@@ -1,0 +1,23 @@
+name: Tag from Version
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create version tag
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "Tagging version: $VERSION"
+          git tag "$VERSION"
+          git push origin "$VERSION"

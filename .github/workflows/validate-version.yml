@@ -1,0 +1,144 @@
+name: "Validate Version Bump"
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check-package-json:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Check package.json version
+        run: |
+          HEAD_VERSION=$(node -p "require('./package.json').version")
+          BASE_VERSION=$(git show main:package.json | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).version")
+          
+          echo "PR version: $HEAD_VERSION"
+          echo "Main version: $BASE_VERSION"
+          
+          if [ "$HEAD_VERSION" = "$BASE_VERSION" ]; then
+            echo "❌ package.json version not bumped"
+            exit 1
+          fi
+          
+          IFS='.' read -r HA HB HC <<< "$HEAD_VERSION"
+          IFS='.' read -r BA BB BC <<< "$BASE_VERSION"
+          
+          if (( HA > BA )) || \
+             (( HA == BA && HB > BB )) || \
+             (( HA == BA && HB == BB && HC > BC )); then
+            echo "✅ package.json version bumped"
+          else
+            echo "❌ package.json version not bumped"
+            exit 1
+          fi
+
+      - name: Set commit status
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.payload.pull_request.head.sha,
+              state: '${{ job.status }}' === 'success' ? 'success' : 'failure',
+              description: 'package.json version bumped',
+              context: 'version-bump/package-json'
+            });
+
+  check-plugin-json:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Check openclaw.plugin.json version
+        run: |
+          HEAD_VERSION=$(node -p "require('./openclaw.plugin.json').version")
+          BASE_VERSION=$(git show main:openclaw.plugin.json | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).version")
+          
+          echo "PR version: $HEAD_VERSION"
+          echo "Main version: $BASE_VERSION"
+          
+          if [ "$HEAD_VERSION" = "$BASE_VERSION" ]; then
+            echo "❌ openclaw.plugin.json version not bumped"
+            exit 1
+          fi
+          
+          IFS='.' read -r HA HB HC <<< "$HEAD_VERSION"
+          IFS='.' read -r BA BB BC <<< "$BASE_VERSION"
+          
+          if (( HA > BA )) || \
+             (( HA == BA && HB > BB )) || \
+             (( HA == BA && HB == BB && HC > BC )); then
+            echo "✅ openclaw.plugin.json version bumped"
+          else
+            echo "❌ openclaw.plugin.json version not bumped"
+            exit 1
+          fi
+
+      - name: Set commit status
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.payload.pull_request.head.sha,
+              state: '${{ job.status }}' === 'success' ? 'success' : 'failure',
+              description: 'openclaw.plugin.json version bumped',
+              context: 'version-bump/plugin-json'
+            });
+
+  check-versions-match:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Check versions match
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          PLUGIN_VERSION=$(node -p "require('./openclaw.plugin.json').version")
+          
+          echo "package.json: $PKG_VERSION"
+          echo "openclaw.plugin.json: $PLUGIN_VERSION"
+          
+          if [ "$PKG_VERSION" = "$PLUGIN_VERSION" ]; then
+            echo "✅ Versions match"
+          else
+            echo "❌ Versions do not match"
+            exit 1
+          fi
+
+      - name: Set commit status
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.payload.pull_request.head.sha,
+              state: '${{ job.status }}' === 'success' ? 'success' : 'failure',
+              description: 'package.json and plugin version match',
+              context: 'version-bump/match'
+            });

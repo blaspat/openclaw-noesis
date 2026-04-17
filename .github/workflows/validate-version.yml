@@ -35,12 +35,13 @@ jobs:
           IFS='.' read -r HA HB HC <<< "$HEAD_VERSION"
           IFS='.' read -r BA BB BC <<< "$BASE_VERSION"
           
-          if (( HA > BA )) || \
-             (( HA == BA && HB > BB )) || \
-             (( HA == BA && HB == BB && HC > BC )); then
-            echo "✅ package.json version bumped"
+          # Strip leading zeros to force numeric (not octal/lexicographic) comparison
+          if (( ${HA#0} + 0 > ${BA#0} + 0 )) || \
+             (( ${HA#0} + 0 == ${BA#0} + 0 && ${HB#0} + 0 > ${BB#0} + 0 )) || \
+             (( ${HA#0} + 0 == ${BA#0} + 0 && ${HB#0} + 0 == ${BB#0} + 0 && ${HC#0} + 0 > ${BC#0} + 0 )); then
+            echo "PASS: package.json version bumped"
           else
-            echo "❌ package.json version not bumped"
+            echo "FAIL: package.json version not bumped"
             exit 1
           fi
 
@@ -83,12 +84,13 @@ jobs:
           IFS='.' read -r HA HB HC <<< "$HEAD_VERSION"
           IFS='.' read -r BA BB BC <<< "$BASE_VERSION"
           
-          if (( HA > BA )) || \
-             (( HA == BA && HB > BB )) || \
-             (( HA == BA && HB == BB && HC > BC )); then
-            echo "✅ openclaw.plugin.json version bumped"
+          # Strip leading zeros to force numeric (not octal/lexicographic) comparison
+          if (( ${HA#0} + 0 > ${BA#0} + 0 )) || \
+             (( ${HA#0} + 0 == ${BA#0} + 0 && ${HB#0} + 0 > ${BB#0} + 0 )) || \
+             (( ${HA#0} + 0 == ${BA#0} + 0 && ${HB#0} + 0 == ${BB#0} + 0 && ${HC#0} + 0 > ${BC#0} + 0 )); then
+            echo "PASS: openclaw.plugin.json version bumped"
           else
-            echo "❌ openclaw.plugin.json version not bumped"
+            echo "FAIL: openclaw.plugin.json version not bumped"
             exit 1
           fi
 
@@ -123,9 +125,9 @@ jobs:
           echo "openclaw.plugin.json: $PLUGIN_VERSION"
           
           if [ "$PKG_VERSION" = "$PLUGIN_VERSION" ]; then
-            echo "✅ Versions match"
+            echo "PASS: Versions match"
           else
-            echo "❌ Versions do not match"
+            echo "FAIL: Versions do not match"
             exit 1
           fi
 

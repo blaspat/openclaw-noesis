@@ -15,25 +15,7 @@ env:
   REGISTRY_URL: "https://registry.npmjs.org"
 
 jobs:
-  create-tag:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.tag.outputs.VERSION }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Create version tag
-        id: tag
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "Creating tag: $VERSION"
-          git tag "$VERSION"
-          git push "origin" "refs/tags/$VERSION"
-
   build:
-    needs: create-tag
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -56,19 +38,19 @@ jobs:
       - name: Upload dist artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ needs.create-tag.outputs.version }}
+          name: dist-${{ github.sha }}
           path: dist/
           retention-days: 1
 
   publish-npm:
-    needs: [create-tag, build]
+    needs: build
     runs-on: ubuntu-latest
     environment: npm
     steps:
       - name: Download dist artifact
         uses: actions/download-artifact@v4
         with:
-          name: dist-${{ needs.create-tag.outputs.version }}
+          name: dist-${{ github.sha }}
           path: dist/
 
       - name: Setup Node
@@ -81,14 +63,35 @@ jobs:
       - name: Publish to npm
         run: NODE_AUTH_TOKEN="" npm publish
 
+  create-tag:
+    needs: publish-npm
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.tag.outputs.VERSION }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Create version tag
+        id: tag
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Creating tag: $VERSION"
+          git tag "$VERSION"
+          git push "origin" "refs/tags/$VERSION"
+
   publish-gh-release:
-    needs: [create-tag, publish-npm]
+    needs: create-tag
     runs-on: ubuntu-latest
     steps:
       - name: Download dist artifact
         uses: actions/download-artifact@v4
         with:
-          name: dist-${{ needs.create-tag.outputs.version }}
+          name: dist-${{ github.sha }}
           path: dist/
 
       - name: Create GitHub Release

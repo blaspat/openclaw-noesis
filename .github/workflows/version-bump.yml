@@ -23,6 +23,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Bump version
+        id: bump
         run: |
           NEW_VERSION=$(bash scripts/bump-version.sh patch)
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT

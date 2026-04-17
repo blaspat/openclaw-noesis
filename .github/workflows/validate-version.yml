@@ -21,11 +21,10 @@ jobs:
       - name: Check package.json version
         run: |
           HEAD_VERSION=$(node -p "require('./package.json').version")
-          BASE_VERSION=$(curl -s -H "Authorization: Bearer ${{ github.token }}" \
+          CONTENT=$(curl -s -H "Authorization: Bearer ${{ github.token }}" \
             "https://api.github.com/repos/${{ github.repository }}/contents/package.json?ref=${{ github.event.repository.default_branch }}" \
-            | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).content") \
-            | base64 -d \
-            | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).version")
+            | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).content")
+          BASE_VERSION=$(echo "$CONTENT" | base64 -d | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).version")
           
           echo "PR version: $HEAD_VERSION"
           echo "Main version: $BASE_VERSION"
@@ -73,11 +72,10 @@ jobs:
       - name: Check openclaw.plugin.json version
         run: |
           HEAD_VERSION=$(node -p "require('./openclaw.plugin.json').version")
-          BASE_VERSION=$(curl -s -H "Authorization: Bearer ${{ github.token }}" \
+          CONTENT=$(curl -s -H "Authorization: Bearer ${{ github.token }}" \
             "https://api.github.com/repos/${{ github.repository }}/contents/openclaw.plugin.json?ref=${{ github.event.repository.default_branch }}" \
-            | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).content") \
-            | base64 -d \
-            | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).version")
+            | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).content")
+          BASE_VERSION=$(echo "$CONTENT" | base64 -d | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).version")
           
           echo "PR version: $HEAD_VERSION"
           echo "Main version: $BASE_VERSION"

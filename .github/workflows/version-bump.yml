@@ -1,7 +1,7 @@
 name: "Version Bump"
 
 on:
-  pull_request:
+  pull_request_target:
     branches:
       - main
     types:
@@ -37,19 +37,15 @@ jobs:
           git commit -m "chore: bump version to ${{ steps.bump.outputs.version }}"
           git push
       
-      - name: Create check run
+      - name: Set commit status
         uses: actions/github-script@v7
         with:
           script: |
-            await github.rest.checks.create({
+            await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              name: 'version-bump',
-              head_sha: context.payload.pull_request.head.sha,
-              status: 'completed',
-              conclusion: 'success',
-              output: {
-                title: 'Version bumped',
-                summary: 'Version was bumped to ${{ steps.bump.outputs.version }}'
-              }
+              sha: context.payload.pull_request.head.sha,
+              state: 'success',
+              description: 'Version bumped successfully',
+              context: 'version-bump'
             });

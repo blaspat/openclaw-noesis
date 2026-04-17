@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  NODE_VERSION: "24"
+  REGISTRY_URL: "https://registry.npmjs.org"
+
+jobs:
+  create-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.tag.outputs.VERSION }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create version tag
+        id: tag
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Creating tag: $VERSION"
+          gh tag create "$VERSION"
+
+  publish:
+    needs: create-tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.create-tag.outputs.version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: ${{ env.REGISTRY_URL }}
+          cache: 'npm'
+
+      - name: Install & Build
+        run: npm ci && npm run build
+
+      - name: Publish to npm
+        run: NODE_AUTH_TOKEN="" npm publish
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/*.js
+            dist/*.d.ts
+            dist/*.js.map
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "Release failed — rolling back tag and GitHub release"
+          gh tag delete ${{ needs.create-tag.outputs.version }} --yes || true
+          gh release delete ${{ needs.create-tag.outputs.version }} --yes || true

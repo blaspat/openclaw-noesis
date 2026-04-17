@@ -2,11 +2,11 @@ name: Publish
 
 on:
   push:
-    tags:
-      - "*"
+    branches:
+      - main"
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 env:
@@ -35,7 +35,6 @@ jobs:
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
-        if: github.ref_type == 'tag'
         with:
           files: |
             dist/*.js
@@ -44,3 +43,9 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Create version tag
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "Tagging version: $VERSION"
+          gh tag create "$VERSION"

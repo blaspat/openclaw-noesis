@@ -19,5 +19,4 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           echo "Tagging version: $VERSION"
-          git tag "$VERSION"
-          git push origin "$VERSION"
+          gh tag create "$VERSION"

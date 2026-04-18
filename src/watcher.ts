@@ -26,6 +26,10 @@ export interface SessionWatcher {
  * an indexing operation is in-flight (prevents race condition where mid-index
  * writes get silently dropped).
  *
+ * Race condition fix: if the file's size changed between the start and end of
+ * indexSessionFile (detected via fs.stat), the file was still being written
+ * when we read it. Re-debounce instead of treating the partial content as final.
+ *
  * Returns a handle with a close() method for cleanup.
  */
 export function startQmdWatcher(
@@ -50,6 +54,8 @@ export function startQmdWatcher(
   const pending = new Map<string, NodeJS.Timeout>();
   // inflight: files currently being indexed (prevents concurrent indexing of same file)
   const inflight = new Set<string>();
+  // inflightSize: file size at the start of indexing (for race detection)
+  const inflightSize = new Map<string, number>();
 
   const watcher = chokidarWatch(sessionPatterns, {
     persistent: true,
@@ -70,13 +76,36 @@ export function startQmdWatcher(
         logger?.(`[noesis/watcher] ${filePath}: indexing in progress, will re-debounce after`);
         return;
       }
+      // Record file size before indexing — detect if file is still being written
+      let sizeAtStart = 0;
+      try {
+        const stat = fs.statSync(filePath);
+        sizeAtStart = stat.size;
+      } catch {
+        // File may be gone — proceed and let indexSessionFile handle the error
+      }
       inflight.add(filePath);
+      inflightSize.set(filePath, sizeAtStart);
       try {
         await indexSessionFile(filePath, db, ollama, config, logger);
+        // Check if file grew while we were reading — if so, re-debounce for the new content
+        try {
+          const sizeAtEnd = fs.statSync(filePath).size;
+          if (sizeAtEnd !== sizeAtStart) {
+            logger?.(`[noesis/watcher] ${filePath}: file grew during indexing (${sizeAtStart} → ${sizeAtEnd}), re-debouncing`);
+            inflight.delete(filePath);
+            inflightSize.delete(filePath);
+            scheduleDebounce(filePath);
+            return;
+          }
+        } catch {
+          // File gone — ignore
+        }
       } catch (err) {
         logger?.(`[noesis/watcher] Error indexing ${filePath}: ${err}`);
       } finally {
         inflight.delete(filePath);
+        inflightSize.delete(filePath);
       }
     }, DEBOUNCE_MS);
     pending.set(filePath, timer);
@@ -95,6 +124,7 @@ export function startQmdWatcher(
       for (const t of pending.values()) clearTimeout(t);
       pending.clear();
       inflight.clear();
+      inflightSize.clear();
     },
   };
 }

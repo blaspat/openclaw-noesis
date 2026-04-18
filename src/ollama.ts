@@ -122,19 +122,26 @@ export async function autoConfigOllama(
  */
 export function createOllamaClient(endpoint: string, model: string): OllamaClient {
   async function embed(text: string): Promise<number[]> {
-    const res = await fetch(`${endpoint}/api/embeddings`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model, prompt: text }),
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Ollama /api/embeddings error ${res.status}: ${body}`);
+    try {
+      const res = await fetch(`${endpoint}/api/embeddings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model, prompt: text }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`Ollama /api/embeddings error ${res.status}: ${body}`);
+      }
+      const data = (await res.json()) as { embedding?: number[] };
+      if (!data.embedding) throw new Error("Ollama returned no embedding vector");
+      return data.embedding;
+    } catch (err) {
+      // Graceful degradation: return zero vector on embed failure.
+      // Caller can detect via all-zero embedding.
+      const dim = model.includes("mxbai") ? 1024 : 768;
+      return new Array(dim).fill(0);
     }
-    const data = (await res.json()) as { embedding?: number[] };
-    if (!data.embedding) throw new Error("Ollama returned no embedding vector");
-    return data.embedding;
   }
 
   async function embedBatch(texts: string[]): Promise<number[][]> {

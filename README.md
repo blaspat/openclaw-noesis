@@ -427,6 +427,17 @@ Memory slot integration means OpenClaw's auto-recall loop calls `memory_search` 
 
 ---
 
+## TODO / Future Improvements
+
+These are known limitations and planned enhancements — not bugs, but areas where Noesis can grow:
+
+- [ ] **Fix recall to filter expired entries** — ensure expired (TTL-reached) entries are excluded from `memory_recall` results. Currently `recall()` returns all non-archived entries regardless of whether their TTL has passed.
+- [ ] **Add archive TTL cleanup** — entries in the archive table live forever. Add a configurable `archiveTtlDays` option (default: 365) so archive entries are auto-deleted after N days, preventing unbounded long-term storage growth.
+- [ ] **Upgrade from beta LanceDB** — current dependency is `@lancedb/lancedb@^0.28.0-beta.5`. Pin to a stable release when one is available and tested.
+- [ ] **Add backup tool (`noesis_backup`)** — export the full LanceDB directory (`~/.openclaw/noesis/`) as a compressed tarball for point-in-time memory snapshots. Should support listing and restoring from backups.
+
+---
+
 ## License
 
 See [LICENSE.md](./LICENSE.md) for the full MIT license text.

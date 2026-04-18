@@ -14,7 +14,7 @@ env:
   REGISTRY_URL: "https://registry.npmjs.org"
 
 jobs:
-  build-and-publish:
+  release:
     runs-on: ubuntu-latest
     environment: npm
     steps:
@@ -31,48 +31,18 @@ jobs:
           registry-url: ${{ env.REGISTRY_URL }}
           cache: 'npm'
 
-      - name: Install, Build & Publish
-        run: npm ci && npm run build && NODE_AUTH_TOKEN="" npm publish
+      - name: Install & Build
+        run: npm ci && npm run build
 
-  create-tag:
-    needs: build-and-publish
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.tag.outputs.VERSION }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
+      - name: Publish to npm
+        run: NODE_AUTH_TOKEN="" npm publish
 
-      - name: Create version tag
-        id: tag
+      - name: Create GitHub Release
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "Creating tag: $VERSION"
-          git tag "$VERSION"
-          git push "origin" "refs/tags/$VERSION"
-
-  publish-gh-release:
-    needs: create-tag
-    runs-on: ubuntu-latest
-    steps:
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            dist/*.js
-            dist/*.d.ts
+          gh release create "$VERSION" \
+            --generate-notes \
+            --repo ${{ github.repository }} \
+            dist/*.js \
+            dist/*.d.ts \
             dist/*.js.map
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Rollback on failure
-        if: failure()
-        run: |
-          echo "Release failed — rolling back tag and GitHub release"
-          gh tag delete ${{ needs.create-tag.outputs.version }} --yes || true
-          gh release delete ${{ needs.create-tag.outputs.version }} --yes || true

@@ -47,6 +47,8 @@ export interface NoesisConfig {
   topK: number;
   autoMigrate: boolean;
   indexQmdSessions: boolean;
+  /** Interval in minutes for scanning session files. 0 = disabled. Default: 5 */
+  sessionScanIntervalMinutes: number;
   watchMemoryDirs: boolean;
   gitLfsEnabled: boolean;
   gitLfsRepo: string;
@@ -85,6 +87,7 @@ export const DEFAULT_CONFIG: NoesisConfig = {
   topK: 6,
   autoMigrate: false,
   indexQmdSessions: true,
+  sessionScanIntervalMinutes: 5,
   watchMemoryDirs: false,
   gitLfsEnabled: false,
   gitLfsRepo: "<username>/openclaw-noesis-data",

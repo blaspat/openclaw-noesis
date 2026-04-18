@@ -38,95 +38,9 @@ export function startQmdWatcher(
   config: NoesisConfig,
   logger?: (msg: string) => void
 ): SessionWatcher {
-  const home = os.homedir();
-
-  const sessionPatterns = [
-    // Top-level sessions: ~/.openclaw/sessions/<sessionId>.jsonl
-    // and nested: ~/.openclaw/sessions/<agentId>/<sessionId>.jsonl
-    path.join(home, ".openclaw", "sessions", "**", "*.jsonl"),
-    // Agent sessions: ~/.openclaw/agents/<agentId>/sessions/
-    path.join(home, ".openclaw", "agents", "*", "sessions", "*.jsonl"),
-    // Agent QMD sessions: ~/.openclaw/agents/<agentId>/qmd/sessions/
-    path.join(home, ".openclaw", "agents", "*", "qmd", "sessions", "*.jsonl"),
-  ];
-
-  // pending: files with a debounce timer scheduled
-  const pending = new Map<string, NodeJS.Timeout>();
-  // inflight: files currently being indexed (prevents concurrent indexing of same file)
-  const inflight = new Set<string>();
-  // inflightSize: file size at the start of indexing (for race detection)
-  const inflightSize = new Map<string, number>();
-
-  const watcher = chokidarWatch(sessionPatterns, {
-    persistent: true,
-    ignoreInitial: false,
-    awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
-  });
-
-  const scheduleDebounce = (filePath: string) => {
-    // Clear any existing debounce for this file
-    const existing = pending.get(filePath);
-    if (existing !== undefined) {
-      clearTimeout(existing);
-    }
-    const timer = setTimeout(async () => {
-      pending.delete(filePath);
-      // Skip if already indexing this file
-      if (inflight.has(filePath)) {
-        logger?.(`[noesis/watcher] ${filePath}: indexing in progress, will re-debounce after`);
-        return;
-      }
-      // Record file size before indexing — detect if file is still being written
-      let sizeAtStart = 0;
-      try {
-        const stat = fs.statSync(filePath);
-        sizeAtStart = stat.size;
-      } catch {
-        // File may be gone — proceed and let indexSessionFile handle the error
-      }
-      inflight.add(filePath);
-      inflightSize.set(filePath, sizeAtStart);
-      try {
-        await indexSessionFile(filePath, db, ollama, config, logger);
-        // Check if file grew while we were reading — if so, re-debounce for the new content
-        try {
-          const sizeAtEnd = fs.statSync(filePath).size;
-          if (sizeAtEnd !== sizeAtStart) {
-            logger?.(`[noesis/watcher] ${filePath}: file grew during indexing (${sizeAtStart} → ${sizeAtEnd}), re-debouncing`);
-            inflight.delete(filePath);
-            inflightSize.delete(filePath);
-            scheduleDebounce(filePath);
-            return;
-          }
-        } catch {
-          // File gone — ignore
-        }
-      } catch (err) {
-        logger?.(`[noesis/watcher] Error indexing ${filePath}: ${err}`);
-      } finally {
-        inflight.delete(filePath);
-        inflightSize.delete(filePath);
-      }
-    }, DEBOUNCE_MS);
-    pending.set(filePath, timer);
-  };
-
-  watcher.on("add", scheduleDebounce);
-  watcher.on("change", scheduleDebounce);
-  watcher.on("error", (err) => logger?.(`[noesis/watcher] Watcher error: ${err}`));
-
-  const watchedPaths = sessionPatterns.join(", ");
-  logger?.(`[noesis/watcher] Watching sessions: ${watchedPaths}`);
-
-  return {
-    close() {
-      watcher.close();
-      for (const t of pending.values()) clearTimeout(t);
-      pending.clear();
-      inflight.clear();
-      inflightSize.clear();
-    },
-  };
+  // Chokidar-based watcher disabled — session scanning is done by startSessionScanner (interval-based).
+  logger?.(`[noesis/watcher] Session watcher disabled (using interval scanner)`);
+  return { close() {} };
 }
 
 const AGENTS_PATH = path.join(os.homedir(), ".openclaw", "agents");
@@ -331,7 +245,7 @@ async function indexMemoryFile(
  *   ~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl
  *   ~/.openclaw/agents/<agentId>/qmd/sessions/<sessionId>.jsonl
  */
-function parseSessionPath(filePath: string): { agentId: string; sessionId: string } {
+export function parseSessionPath(filePath: string): { agentId: string; sessionId: string } {
   const home = os.homedir();
   const rel = filePath.startsWith(home) ? path.relative(home, filePath) : filePath;
   const parts = rel.split(path.sep).filter(Boolean);
@@ -371,7 +285,7 @@ function parseSessionPath(filePath: string): { agentId: string; sessionId: strin
  * QMD format: one JSON object per line, each representing a message event.
  * We extract assistant + user messages with content, chunk them, and embed.
  */
-async function indexSessionFile(
+export async function indexSessionFile(
   filePath: string,
   db: NoesisDB,
   ollama: OllamaClient,
@@ -473,4 +387,97 @@ async function indexSessionFile(
   if (indexed > 0) {
     logger?.(`[noesis/watcher] Indexed ${indexed} chunk(s) from session ${sessionId} (agent: ${agentId})`);
   }
+}
+
+// ─── Interval-based session scanner (replaces chokidar watcher) ─────────────
+
+const SESSION_SCAN_INTERVAL_DEFAULT_MS = 5 * 60 * 1000; // 5 minutes
+
+export interface SessionScanner {
+  close: () => void;
+}
+
+/**
+ * Periodically scan agent session directories for new or changed session files
+ * and index them. Uses setInterval instead of filesystem watchers for reliability.
+ * Deduplication via content checksum ensures idempotent re-indexing.
+ */
+export function startSessionScanner(
+  db: NoesisDB,
+  ollama: OllamaClient,
+  config: NoesisConfig,
+  logger?: (msg: string) => void
+): SessionScanner {
+  const home = os.homedir();
+  const agentsPath = path.join(home, ".openclaw", "agents");
+  const intervalMs = (config.sessionScanIntervalMinutes > 0
+    ? config.sessionScanIntervalMinutes
+    : 5) * 60 * 1000;
+
+  // Track in-flight index operations to avoid concurrent processing of the same file
+  const inflight = new Set<string>();
+
+  const scanSessionDirs = async () => {
+    if (!fs.existsSync(agentsPath)) return;
+
+    let agentDirs: string[] = [];
+    try {
+      agentDirs = fs.readdirSync(agentsPath).filter(
+        (d) => !d.startsWith(".") && !d.startsWith(".")
+      );
+    } catch {
+      return;
+    }
+
+    for (const agentDir of agentDirs) {
+      const sessionsDir = path.join(agentsPath, agentDir, "sessions");
+      if (!fs.existsSync(sessionsDir)) continue;
+
+      let files: string[] = [];
+      try {
+        files = fs.readdirSync(sessionsDir).filter(
+          (f) => f.endsWith(".jsonl") && !f.includes(".lock") && !f.includes(".checkpoint") && !f.includes(".reset")
+        );
+      } catch {
+        continue;
+      }
+
+      for (const file of files) {
+        const filePath = path.join(sessionsDir, file);
+        // Skip if already being indexed
+        if (inflight.has(filePath)) continue;
+        inflight.add(filePath);
+        try {
+          await indexSessionFile(filePath, db, ollama, config, logger);
+        } catch (err) {
+          logger?.(`[noesis/scanner] Error indexing ${filePath}: ${err}`);
+        } finally {
+          inflight.delete(filePath);
+        }
+      }
+    }
+  };
+
+  // Run once on startup after a brief delay to let the plugin settle
+  const startupTimeout = setTimeout(() => {
+    scanSessionDirs().catch((err) => {
+      logger?.(`[noesis/scanner] Startup scan error: ${err}`);
+    });
+  }, 3000);
+
+  const intervalId = setInterval(() => {
+    scanSessionDirs().catch((err) => {
+      logger?.(`[noesis/scanner] Periodic scan error: ${err}`);
+    });
+  }, intervalMs);
+
+  logger?.(`[noesis/scanner] Session scanner started (interval: ${config.sessionScanIntervalMinutes ?? 5}min)`);
+
+  return {
+    close() {
+      clearTimeout(startupTimeout);
+      clearInterval(intervalId);
+      inflight.clear();
+    },
+  };
 }

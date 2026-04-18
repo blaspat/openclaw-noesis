@@ -18,7 +18,7 @@ import { autoConfigOllama, OllamaClient, contentChecksum, chunkText } from "./ol
 import { NoesisDB } from "./lancedb.js";
 import { hybridSearch, cosineSimilarityDense } from "./search.js";
 import { importMarkdownFiles, importAllAgents } from "./migrator.js";
-import { startQmdWatcher, SessionWatcher, startMemoryWatcher } from "./watcher.js";
+import { startQmdWatcher, SessionWatcher, startMemoryWatcher, startSessionScanner, SessionScanner } from "./watcher.js";
 import {
   logError,
   logFatal,
@@ -77,6 +77,7 @@ let db: NoesisDB | null = null;
 let ollama: OllamaClient | null = null;
 let watcher: SessionWatcher | null = null;
 let memoryWatcher: SessionWatcher | null = null;
+let sessionScanner: SessionScanner | null = null;
 let resolvedConfig: NoesisConfig = { ...DEFAULT_CONFIG };
 let initialized = false;
 let cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
@@ -1203,12 +1204,12 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
     }
   }
 
-  // 4. Optional: watch QMD sessions
+  // 4. Optional: interval-based session scanner (replaces chokidar watcher)
   if (config.indexQmdSessions) {
     try {
-      watcher = startQmdWatcher(db, ollama, config, safeLog);
+      sessionScanner = startSessionScanner(db, ollama, config, safeLog);
     } catch (err) {
-      logError("Failed to start QMD session watcher", { error: err, extra: { indexQmdSessions: true } });
+      logError("Failed to start session scanner", { error: err, extra: { indexQmdSessions: true } });
     }
   }
 
@@ -1283,6 +1284,7 @@ function buildConfig(raw: Record<string, unknown>): NoesisConfig {
     topK: Number(raw.topK ?? DEFAULT_CONFIG.topK),
     autoMigrate: Boolean(raw.autoMigrate ?? DEFAULT_CONFIG.autoMigrate),
     indexQmdSessions: Boolean(raw.indexQmdSessions ?? DEFAULT_CONFIG.indexQmdSessions),
+    sessionScanIntervalMinutes: Number(raw.sessionScanIntervalMinutes ?? DEFAULT_CONFIG.sessionScanIntervalMinutes),
     watchMemoryDirs: Boolean(raw.watchMemoryDirs ?? DEFAULT_CONFIG.watchMemoryDirs),
     gitLfsEnabled: Boolean(raw.gitLfsEnabled ?? DEFAULT_CONFIG.gitLfsEnabled),
     gitLfsRepo: String(raw.gitLfsRepo ?? DEFAULT_CONFIG.gitLfsRepo),

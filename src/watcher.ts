@@ -2,7 +2,6 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { randomUUID } from "crypto";
-import { watch as chokidarWatch } from "chokidar";
 import { OllamaClient, chunkText, contentChecksum } from "./ollama.js";
 import { NoesisDB } from "./lancedb.js";
 import { MemoryEntry, MemoryType, NoesisConfig } from "./types.js";
@@ -58,61 +57,8 @@ export function startMemoryWatcher(
   config: NoesisConfig,
   logger?: (msg: string) => void
 ): SessionWatcher {
-  if (!fs.existsSync(AGENTS_PATH)) {
-    logger?.(`[noesis/memory-watcher] Agents dir not found: ${AGENTS_PATH}`);
-    return { close() {} };
-  }
-
-  const globPattern = path.join(AGENTS_PATH, "*", "workspace", "memory", "*.md");
-  const pending = new Map<string, NodeJS.Timeout>();
-  const inflight = new Set<string>();
-
-  const watcher = chokidarWatch(globPattern, {
-    persistent: true,
-    ignoreInitial: false,
-    awaitWriteFinish: { stabilityThreshold: 800, pollInterval: 100 },
-  });
-
-  const scheduleDebounce = (filePath: string) => {
-    const existing = pending.get(filePath);
-    if (existing !== undefined) {
-      clearTimeout(existing);
-    }
-    const timer = setTimeout(async () => {
-      pending.delete(filePath);
-      if (inflight.has(filePath)) {
-        logger?.(`[noesis/memory-watcher] ${filePath}: indexing in progress, will re-debounce after`);
-        return;
-      }
-      inflight.add(filePath);
-      try {
-        const indexed = await indexMemoryFile(filePath, db, ollama, config, logger);
-        if (indexed > 0) {
-          logger?.(`[noesis/memory-watcher] Indexed ${indexed} chunk(s) from ${path.basename(filePath)}`);
-        }
-      } catch (err) {
-        logger?.(`[noesis/memory-watcher] Error indexing ${filePath}: ${err}`);
-      } finally {
-        inflight.delete(filePath);
-      }
-    }, DEBOUNCE_MS);
-    pending.set(filePath, timer);
-  };
-
-  watcher.on("add", scheduleDebounce);
-  watcher.on("change", scheduleDebounce);
-  watcher.on("error", (err) => logger?.(`[noesis/memory-watcher] Watcher error: ${err}`));
-
-  logger?.(`[noesis/memory-watcher] Watching agent memory dirs: ${globPattern}`);
-
-  return {
-    close() {
-      watcher.close();
-      for (const t of pending.values()) clearTimeout(t);
-      pending.clear();
-      inflight.clear();
-    },
-  };
+  // Memory dir watching handled by startSessionScanner (interval-based).
+  return { close() {} };
 }
 
 // ─── Memory file indexer ───────────────────────────────────────────────
@@ -417,42 +363,69 @@ export function startSessionScanner(
   // Track in-flight index operations to avoid concurrent processing of the same file
   const inflight = new Set<string>();
 
-  const scanSessionDirs = async () => {
+  const scanDirs = async () => {
     if (!fs.existsSync(agentsPath)) return;
 
     let agentDirs: string[] = [];
     try {
       agentDirs = fs.readdirSync(agentsPath).filter(
-        (d) => !d.startsWith(".") && !d.startsWith(".")
+        (d) => !d.startsWith(".")
       );
     } catch {
       return;
     }
 
     for (const agentDir of agentDirs) {
+      // Scan session files: agents/<agent>/sessions/*.jsonl
       const sessionsDir = path.join(agentsPath, agentDir, "sessions");
-      if (!fs.existsSync(sessionsDir)) continue;
-
-      let files: string[] = [];
-      try {
-        files = fs.readdirSync(sessionsDir).filter(
-          (f) => f.endsWith(".jsonl") && !f.includes(".lock") && !f.includes(".checkpoint") && !f.includes(".reset")
-        );
-      } catch {
-        continue;
+      if (fs.existsSync(sessionsDir)) {
+        let files: string[] = [];
+        try {
+          files = fs.readdirSync(sessionsDir).filter(
+            (f) => f.endsWith(".jsonl") && !f.includes(".lock") && !f.includes(".checkpoint") && !f.includes(".reset")
+          );
+        } catch {
+          // continue
+        }
+        for (const file of files) {
+          const filePath = path.join(sessionsDir, file);
+          if (inflight.has(filePath)) continue;
+          inflight.add(filePath);
+          try {
+            await indexSessionFile(filePath, db, ollama, config, logger);
+          } catch (err) {
+            logger?.(`[noesis/scanner] Error indexing ${filePath}: ${err}`);
+          } finally {
+            inflight.delete(filePath);
+          }
+        }
       }
 
-      for (const file of files) {
-        const filePath = path.join(sessionsDir, file);
-        // Skip if already being indexed
-        if (inflight.has(filePath)) continue;
-        inflight.add(filePath);
+      // Scan memory files: agents/<agent>/workspace/memory/*.md
+      const memoryDir = path.join(agentsPath, agentDir, "workspace", "memory");
+      if (fs.existsSync(memoryDir)) {
+        let files: string[] = [];
         try {
-          await indexSessionFile(filePath, db, ollama, config, logger);
-        } catch (err) {
-          logger?.(`[noesis/scanner] Error indexing ${filePath}: ${err}`);
-        } finally {
-          inflight.delete(filePath);
+          files = fs.readdirSync(memoryDir).filter(
+            (f) => f.endsWith(".md") && !f.startsWith(".")
+          );
+        } catch {
+          // continue
+        }
+        for (const file of files) {
+          const filePath = path.join(memoryDir, file);
+          if (inflight.has(filePath)) continue;
+          inflight.add(filePath);
+          try {
+            const indexed = await indexMemoryFile(filePath, db, ollama, config, logger);
+            if (indexed > 0) {
+              logger?.(`[noesis/scanner] Indexed ${indexed} chunk(s) from ${file}`);
+            }
+          } catch (err) {
+            logger?.(`[noesis/scanner] Error indexing ${filePath}: ${err}`);
+          } finally {
+            inflight.delete(filePath);
+          }
         }
       }
     }
@@ -460,13 +433,13 @@ export function startSessionScanner(
 
   // Run once on startup after a brief delay to let the plugin settle
   const startupTimeout = setTimeout(() => {
-    scanSessionDirs().catch((err) => {
+    scanDirs().catch((err) => {
       logger?.(`[noesis/scanner] Startup scan error: ${err}`);
     });
   }, 3000);
 
   const intervalId = setInterval(() => {
-    scanSessionDirs().catch((err) => {
+    scanDirs().catch((err) => {
       logger?.(`[noesis/scanner] Periodic scan error: ${err}`);
     });
   }, intervalMs);

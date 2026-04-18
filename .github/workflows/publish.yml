@@ -1,0 +1,51 @@
+name: Publish
+
+on:
+  push:
+    branches:
+      - main"
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  NODE_VERSION: "24"
+  REGISTRY_URL: "https://registry.npmjs.org"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: ${{ env.REGISTRY_URL }}
+          cache: 'npm'
+
+      - name: Install & Build
+        run: npm ci && npm run build
+
+      - name: Publish to npm
+        run: NODE_AUTH_TOKEN="" npm publish
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/*.js
+            dist/*.d.ts
+            dist/*.js.map
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Create version tag
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "Tagging version: $VERSION"
+          gh tag create "$VERSION"

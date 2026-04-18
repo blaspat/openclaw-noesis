@@ -1,0 +1,5 @@
+node_modules/
+*.tgz
+.git.bak/
+status.md
+dist/

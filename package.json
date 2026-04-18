@@ -1,0 +1,56 @@
+{
+  "name": "@blaspat/openclaw-noesis",
+  "version": "1.4.0",
+  "description": "Local-first semantic memory plugin for OpenClaw — LanceDB + Ollama, no cloud required.",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.4.0",
+      "minGatewayVersion": "2026.4.0"
+    }
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "bump": "node scripts/bump-version.js"
+  },
+  "keywords": [
+    "openclaw",
+    "memory",
+    "semantic-search",
+    "lancedb",
+    "ollama",
+    "vector-store",
+    "agent-memory",
+    "local-first"
+  ],
+  "author": "Blasius Patrick",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/blaspat/openclaw-noesis.git"
+  },
+  "homepage": "https://github.com/blaspat/openclaw-noesis#readme",
+  "bugs": {
+    "url": "https://github.com/blaspat/openclaw-noesis/issues"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.4.0"
+  },
+  "dependencies": {
+    "@lancedb/lancedb": "^0.28.0-beta.5",
+    "@sinclair/typebox": "^0.34.0",
+    "apache-arrow": "^18.0.0",
+    "chokidar": "^5.0.0",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -82,6 +82,24 @@ export function logError(
 }
 
 /**
+ * Serialize any rejection reason into a readable string.
+ * Handles Error instances, strings, numbers, booleans, null, undefined,
+ * and arbitrary objects (via JSON stringify fallback).
+ */
+function serializeReason(reason: unknown): string {
+  if (reason instanceof Error) return reason.message;
+  if (typeof reason === "string") return reason;
+  if (typeof reason === "number" || typeof reason === "boolean") return String(reason);
+  if (reason === null) return "null";
+  if (reason === undefined) return "undefined";
+  try {
+    return JSON.stringify(reason);
+  } catch {
+    return Object.prototype.toString.call(reason);
+  }
+}
+
+/**
  * Write a fatal error (unhandled rejection, uncaught exception).
  * Same as logError but level=fatal for filtering.
  */
@@ -105,7 +123,7 @@ export function logFatal(
     if (error instanceof Error) {
       entry.stack = error.stack ?? error.message;
     } else {
-      // Non-Error value (string, object, etc.) — serialize to string for message
+      // Non-Error value: use serialized reason as message
       entry.message = serializeReason(error ?? message);
     }
 
@@ -119,30 +137,12 @@ export function logFatal(
 }
 
 /**
- * Serialize any rejection reason into a structured string so the error log
- * always has a meaningful message — even for non-Error values.
- */
-function serializeReason(reason: unknown): string {
-  if (reason instanceof Error) return reason.message;
-  if (typeof reason === "string") return reason;
-  if (typeof reason === "number" || typeof reason === "boolean") return String(reason);
-  if (reason === null) return "null";
-  if (reason === undefined) return "undefined";
-  try {
-    return JSON.stringify(reason);
-  } catch {
-    return Object.prototype.toString.call(reason);
-  }
-}
-
-/**
  * Install global unhandled rejection and uncaught exception handlers
  * that write to the noesis error log before propagating.
  * Call once during plugin init.
  */
 export function installGlobalErrorHandlers(): void {
   process.on("unhandledRejection", (reason: unknown, promise: Promise<unknown>) => {
-    // Serialize reason fully — even non-Error values (strings, objects) get captured
     const serialized = serializeReason(reason);
     logFatal("Unhandled Promise Rejection", reason, { context: "unhandledRejection", serialized });
   });

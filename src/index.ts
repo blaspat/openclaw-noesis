@@ -24,6 +24,7 @@ import {
   logFatal,
   installGlobalErrorHandlers,
   configureErrorLog,
+  withErrorLog,
 } from "./logger.js";
 
 // ─── plugin state (module-level singletons) ────────────────────────────────
@@ -1128,11 +1129,28 @@ export default definePluginEntry({
 
 // ─── initialization ────────────────────────────────────────────────────────
 
+// Guard: wrap a log function to suppress EPIPE if the log stream is closed.
+// This prevents crashes when stdout/stderr is broken (e.g. pipe to head/jq/grep
+// that closes early) or when the gateway process terminates during log output.
+function makeSafeLog(log: (msg: string) => void): (msg: string) => void {
+  return (msg: string) => {
+    try {
+      log(msg);
+    } catch (err: any) {
+      if (err?.code === "EPIPE" || err?.code === "EIO") return;
+      throw err;
+    }
+  };
+}
+
+
 async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Promise<void> {
+  const safeLog = makeSafeLog(log);
+
   // Set up dedicated error logging first — before anything else
   configureErrorLog(config.errorLogPath);
   installGlobalErrorHandlers();
-  log(`[noesis] Error log: ${config.errorLogPath}`);
+  safeLog(`[noesis] Error log: ${config.errorLogPath}`);
 
   // 1. Connect to LanceDB
   try {
@@ -1162,7 +1180,7 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
 
   try {
     await db.connect(embeddingDim);
-    log(`[noesis] LanceDB connected (${embeddingDim}d embeddings, path: ${config.lanceDbPath})`);
+    safeLog(`[noesis] LanceDB connected (${embeddingDim}d embeddings, path: ${config.lanceDbPath})`);
   } catch (err) {
     logError("Failed to connect to LanceDB", { error: err });
     throw err;
@@ -1170,11 +1188,16 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
 
   initialized = true;
 
-  // 3. Optional: auto-migrate on startup
+  // 3. Optional: auto-migrate on startup — ONLY if DB is empty (first install / fresh DB)
   if (config.autoMigrate) {
-    log("[noesis] autoMigrate enabled — importing markdown memory files...");
     try {
-      await importAllAgents(db, ollama, config, log);
+      const count = await db.count();
+      if (count === 0) {
+        safeLog("[noesis] autoMigrate enabled and DB is empty — importing markdown memory files...");
+        await importAllAgents(db, ollama, config, safeLog);
+      } else {
+        safeLog(`[noesis] autoMigrate enabled but DB already has ${count} entries — skipping auto-migrate (run noesis_import to re-migrate manually)`);
+      }
     } catch (err) {
       logError("Auto-migrate failed", { error: err, extra: { autoMigrate: true } });
     }
@@ -1183,7 +1206,7 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
   // 4. Optional: watch QMD sessions
   if (config.indexQmdSessions) {
     try {
-      watcher = startQmdWatcher(db, ollama, config, log);
+      watcher = startQmdWatcher(db, ollama, config, safeLog);
     } catch (err) {
       logError("Failed to start QMD session watcher", { error: err, extra: { indexQmdSessions: true } });
     }
@@ -1192,7 +1215,7 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
   // 5. Optional: watch agent memory dirs
   if (config.watchMemoryDirs) {
     try {
-      memoryWatcher = startMemoryWatcher(db, ollama, config, log);
+      memoryWatcher = startMemoryWatcher(db, ollama, config, safeLog);
     } catch (err) {
       logError("Failed to start memory dir watcher", { error: err, extra: { watchMemoryDirs: true } });
     }
@@ -1204,11 +1227,11 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
     try {
       const archived = await db.archiveExpired();
       if (archived > 0) {
-        log(`[noesis] Archived ${archived} expired entries.`);
+        safeLog(`[noesis] Archived ${archived} expired entries.`);
         setLastCleanupTimestamp(Date.now());
       }
     } catch (err) {
-      log(`[noesis] Cleanup skipped: ${err}`);
+      safeLog(`[noesis] Cleanup skipped: ${err}`);
       logError("Startup cleanup failed", { error: err, extra: { autoCleanup: true } });
     }
   }
@@ -1220,20 +1243,19 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
       db!.archiveExpired()
         .then((n) => {
           if (n > 0) {
-            log(`[noesis] Periodic cleanup archived ${n} entries.`);
+            safeLog(`[noesis] Periodic cleanup archived ${n} entries.`);
             setLastCleanupTimestamp(Date.now());
           }
         })
         .catch((err) => {
-          log(`[noesis] Periodic cleanup error: ${err}`);
+          safeLog(`[noesis] Periodic cleanup error: ${err}`);
           logError("Periodic cleanup failed", { error: err, extra: { cleanupIntervalHours: config.cleanupIntervalHours } });
         });
     }, intervalMs);
-    log(`[noesis] Periodic cleanup scheduled every ${config.cleanupIntervalHours}h`);
+    safeLog(`[noesis] Periodic cleanup scheduled every ${config.cleanupIntervalHours}h`);
   }
 
-  initialized = true;
-  log("[noesis] Initialization complete.");
+  safeLog("[noesis] Initialization complete.");
 }
 
 async function ensureInitialized(): Promise<void> {

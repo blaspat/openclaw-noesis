@@ -2,7 +2,7 @@
   "id": "noesis",
   "name": "Noesis Memory",
   "description": "Local-first semantic memory + context engine for OpenClaw. LanceDB + Ollama, no cloud. Hybrid search, cross-agent recall, and proactive context assembly (assemble/ingest hooks). Zero LLM cost.",
-  "version": "1.3.8",
+  "version": "1.3.9",
   "kind": "memory",
   "configSchema": {
     "type": "object",

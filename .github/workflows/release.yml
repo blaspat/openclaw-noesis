@@ -15,8 +15,9 @@ env:
   REGISTRY_URL: "https://registry.npmjs.org"
 
 jobs:
-  build:
+  build-and-publish:
     runs-on: ubuntu-latest
+    environment: npm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,12 +29,16 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
+          registry-url: ${{ env.REGISTRY_URL }}
           cache: 'npm'
 
       - name: Install & Build
         run: |
           echo "DEBUG: $(pwd)" && ls -la
           npm ci && npm run build
+
+      - name: Publish to npm
+        run: NODE_AUTH_TOKEN="" npm publish
 
       - name: Upload dist artifact
         uses: actions/upload-artifact@v4
@@ -42,29 +47,8 @@ jobs:
           path: dist/
           retention-days: 1
 
-  publish-npm:
-    needs: build
-    runs-on: ubuntu-latest
-    environment: npm
-    steps:
-      - name: Download dist artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: dist-${{ github.sha }}
-          path: dist/
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          registry-url: ${{ env.REGISTRY_URL }}
-          cache: 'npm'
-
-      - name: Publish to npm
-        run: NODE_AUTH_TOKEN="" npm publish
-
   publish-gh-release:
-    needs: build
+    needs: build-and-publish
     runs-on: ubuntu-latest
     steps:
       - name: Download dist artifact

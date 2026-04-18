@@ -82,6 +82,24 @@ export function logError(
 }
 
 /**
+ * Serialize any rejection reason into a readable string.
+ * Handles Error instances, strings, numbers, booleans, null, undefined,
+ * and arbitrary objects (via JSON stringify fallback).
+ */
+function serializeReason(reason: unknown): string {
+  if (reason instanceof Error) return reason.message;
+  if (typeof reason === "string") return reason;
+  if (typeof reason === "number" || typeof reason === "boolean") return String(reason);
+  if (reason === null) return "null";
+  if (reason === undefined) return "undefined";
+  try {
+    return JSON.stringify(reason);
+  } catch {
+    return Object.prototype.toString.call(reason);
+  }
+}
+
+/**
  * Write a fatal error (unhandled rejection, uncaught exception).
  * Same as logError but level=fatal for filtering.
  */
@@ -104,6 +122,9 @@ export function logFatal(
 
     if (error instanceof Error) {
       entry.stack = error.stack ?? error.message;
+    } else {
+      // Non-Error value: use serialized reason as message
+      entry.message = serializeReason(error ?? message);
     }
 
     const line = JSON.stringify(entry) + "\n";
@@ -122,7 +143,8 @@ export function logFatal(
  */
 export function installGlobalErrorHandlers(): void {
   process.on("unhandledRejection", (reason: unknown, promise: Promise<unknown>) => {
-    logFatal("Unhandled Promise Rejection", reason, { context: "unhandledRejection" });
+    const serialized = serializeReason(reason);
+    logFatal("Unhandled Promise Rejection", reason, { context: "unhandledRejection", serialized });
   });
 
   process.on("uncaughtException", (error: Error) => {

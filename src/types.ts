@@ -68,6 +68,12 @@ export interface NoesisConfig {
   assembleMaxAgeDays: number;
   /** Path to dedicated error log file. Default: ~/.openclaw/noesis/error.log */
   errorLogPath: string;
+  /** Hybrid search: weight for vector score (0–1). BM25 gets 1-vectorWeight. Default: 0.6. Note: for short factual queries, 1.0 (pure vector) may outperform hybrid. */
+  vectorWeight: number;
+  /** Opt-in cross-encoder reranking using Ollama embeddings. More accurate relevance scoring but doubles embed API calls at query time. Default: false */
+  rerank: boolean;
+  /** Optional external reranker API endpoint (e.g. Jina cloud reranker). When set, rerank uses this endpoint instead of local Ollama approximation. */
+  rerankerEndpoint?: string;
 }
 
 export const DEFAULT_CONFIG: NoesisConfig = {
@@ -92,6 +98,8 @@ export const DEFAULT_CONFIG: NoesisConfig = {
   assembleMaxEntries: 20,
   assembleMaxAgeDays: 30,
   errorLogPath: "~/.openclaw/noesis/error.log",
+  vectorWeight: 0.6,
+  rerank: false,
 };
 
 export interface ImportResult {

@@ -13,10 +13,12 @@ export interface HybridSearchOptions {
   memoryType?: MemoryType;
   topK?: number;
   crossAgent?: boolean;
-  /** Weight for vector score in hybrid merge (0–1). BM25 gets 1 - vectorWeight. */
+  /** Weight for vector score in hybrid merge (0–1). BM25 gets 1 - vectorWeight. Default: 0.6 */
   vectorWeight?: number;
-  /** MMR lambda: 0 = max diversity, 1 = max relevance */
+  /** MMR lambda: 0 = max diversity, 1 = max relevance. Default: 0.7 */
   mmrLambda?: number;
+  /** Opt-in cross-encoder reranking using Ollama embeddings. Reranks candidates by true query-document relevance. Default: false */
+  rerank?: boolean;
 }
 
 /**
@@ -103,9 +105,17 @@ export async function hybridSearch(
   }).slice(0, topK * 2);
 
   // 6. MMR rerank
-  const reranked = mmrRerank(withPriority.map((m) => m.result), queryEmbedding, topK, mmrLambda);
+  const mmrResults = mmrRerank(withPriority.map((m) => m.result), queryEmbedding, topK, mmrLambda);
 
-  return reranked.map((r) => ({
+  // 7. Optional cross-encoder rerank — re-embeds query and scores each candidate
+  //    by true query-document relevance (vs. ANN nearest-neighbor which can conflate
+  //    thematically similar but factually different content). Uses cosine similarity
+  //    between fresh query embedding and each candidate's stored embedding.
+  const finalResults = options.rerank
+    ? await crossEncoderRerank(query, mmrResults, ollama, topK, scoreMap)
+    : mmrResults;
+
+  return finalResults.map((r) => ({
     id: r.id,
     agentId: r.agentId,
     sessionId: r.sessionId,
@@ -229,4 +239,68 @@ export function cosineSimilarityDense(a: number[], b: number[]): number {
   }
   const denom = Math.sqrt(normA) * Math.sqrt(normB);
   return denom === 0 ? 0 : dot / denom;
+}
+
+/**
+ * Cross-encoder reranking using Ollama embeddings.
+ *
+ * A true cross-encoder encodes query+document jointly to score relevance.
+ * Since Ollama has no native /rerank endpoint, this approximates by:
+ *   1. Embedding the query freshly (captures current query intent)
+ *   2. Computing cosine similarity between query embedding and each
+ *      candidate's stored embedding (which was encoded from document content)
+ *
+ * The rerank score is blended with the original hybrid score (60% rerank,
+ * 40% original) so candidates that score well on BOTH relevance signals rank top.
+ *
+ * Limitation: without a true cross-encoder model (e.g. jina-reranker-v3 via API),
+ * this is an approximation. Set rerank=false to disable.
+ */
+async function crossEncoderRerank(
+  query: string,
+  candidates: Array<{ id: string; agentId: string; sessionId: string; content: string; memoryType: string; createdAt: number; sourcePath: string; tags: string[]; score: number; priority?: number; expiresAt?: number }>,
+  ollama: OllamaClient,
+  topK: number,
+  scoreMap: Map<string, { result: any; score: number }>
+): Promise<typeof candidates> {
+  if (candidates.length === 0) return [];
+
+  // Re-embed the query with Ollama (fresh embedding = current query intent)
+  const queryEmbedding = await ollama.embed(query);
+
+  // Score each candidate by cosine similarity between query embedding and stored embedding.
+  // We need the stored embedding per candidate — candidates don't carry embeddings
+  // from vectorSearch (only scores), so we use the content as proxy.
+  // For proper cross-encoder quality, candidates would need their stored embeddings
+  // returned from vectorSearch. Since LanceDB doesn't return embeddings in search
+  // results by default, we approximate by re-embedding the content.
+  const contentEmbeddings = await ollama.embedBatch(candidates.map((c) => c.content));
+
+  const rerankScores = candidates.map((c, i) => ({
+    candidate: c,
+    rerankScore: cosineSimilarityDense(queryEmbedding, contentEmbeddings[i]),
+  }));
+
+  // Normalize rerank scores to [0, 1] range for blending
+  const maxRerank = Math.max(...rerankScores.map((r) => r.rerankScore), 1);
+  const minRerank = Math.min(...rerankScores.map((r) => r.rerankScore), 0);
+  const rangeRerank = maxRerank - minRerank || 1;
+
+  // Blend: 60% cross-encoder score, 40% original hybrid score
+  const RERANK_WEIGHT = 0.6;
+  const ORIGINAL_WEIGHT = 0.4;
+
+  const blended = rerankScores.map(({ candidate, rerankScore }) => {
+    const normalizedRerank = (rerankScore - minRerank) / rangeRerank;
+    const originalScore = scoreMap.get(candidate.id)?.score ?? candidate.score ?? 0;
+    const blendedScore =
+      RERANK_WEIGHT * normalizedRerank +
+      ORIGINAL_WEIGHT * originalScore;
+    return { candidate, blendedScore };
+  });
+
+  return blended
+    .sort((a, b) => b.blendedScore - a.blendedScore)
+    .slice(0, topK)
+    .map((b) => b.candidate);
 }

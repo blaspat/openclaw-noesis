@@ -28,6 +28,50 @@ import {
 
 // ─── plugin state (module-level singletons) ────────────────────────────────
 
+// ─── last-cleanup timestamp helpers ────────────────────────────────────────────
+
+const LAST_CLEANUP_FILE = path.join(os.homedir(), ".openclaw", "noesis", ".last-cleanup");
+
+/**
+ * Read the last cleanup timestamp from disk. Returns 0 if file doesn't exist.
+ */
+function getLastCleanupTimestamp(): number {
+  try {
+    if (fs.existsSync(LAST_CLEANUP_FILE)) {
+      return Number(fs.readFileSync(LAST_CLEANUP_FILE, "utf-8").trim());
+    }
+  } catch {
+    // File missing or unreadable — treat as 0 (never cleaned)
+  }
+  return 0;
+}
+
+/**
+ * Persist the last cleanup timestamp to disk.
+ */
+function setLastCleanupTimestamp(ts: number): void {
+  try {
+    const dir = path.dirname(LAST_CLEANUP_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(LAST_CLEANUP_FILE, String(ts), "utf-8");
+  } catch {
+    // Best-effort — non-fatal if this fails
+  }
+}
+
+/**
+ * Log a warning if the gap since last cleanup is unexpectedly large (> 24h).
+ */
+function warnOnLargeCleanupGap(log: (msg: string) => void): void {
+  const last = getLastCleanupTimestamp();
+  if (last === 0) return; // never cleaned — first run, normal
+  const gapHours = (Date.now() - last) / (1000 * 60 * 60);
+  if (gapHours > 24) {
+    log(`[noesis] Warning: ${gapHours.toFixed(1)}h since last TTL cleanup. ` +
+      "Expired entries may have accumulated. Consider restarting the gateway to trigger auto-cleanup.");
+  }
+}
+
 let db: NoesisDB | null = null;
 let ollama: OllamaClient | null = null;
 let watcher: SessionWatcher | null = null;
@@ -760,6 +804,8 @@ export default definePluginEntry({
             agentId: params.agentId ? String(params.agentId) : undefined,
             topK: params.topK ? Number(params.topK) : resolvedConfig.topK,
             crossAgent: Boolean(params.crossAgent),
+            vectorWeight: resolvedConfig.vectorWeight,
+            rerank: resolvedConfig.rerank,
           });
 
           const formatted = results
@@ -835,22 +881,26 @@ export default definePluginEntry({
           const ttlDays = Number(params.ttlDays ?? resolvedConfig.defaultTtlDays);
           const expiresAt = ttlDays > 0 ? Date.now() + ttlDays * 86400 * 1000 : 0;
 
-          const chunks = chunkText(content, resolvedConfig.chunkSize, resolvedConfig.chunkOverlap);
-          const embeddings = await ollama!.embedBatch(chunks);
+          // Embed the full content once — all chunks share this embedding.
+          // This avoids N separate embedding calls for an N-chunk entry and
+          // ensures semantic consistency: all chunks retrieve against the same
+          // content embedding, which is the text actually stored and returned.
+          const [contentEmbedding] = await ollama!.embedBatch([content]);
+          const contentChecksum_ = contentChecksum(content, agentId);
 
-          const entries = chunks.map((chunk, i) => ({
+          const entries = chunkText(content, resolvedConfig.chunkSize, resolvedConfig.chunkOverlap).map((chunk) => ({
             id: randomUUID(),
             agentId,
             sessionId,
             content,
             chunk,
-            embedding: embeddings[i],
+            embedding: contentEmbedding, // shared across all chunks
             memoryType,
             priority,
             expiresAt,
             createdAt: Date.now(),
             sourcePath: "",
-            checksum: contentChecksum(content + chunk, agentId),
+            checksum: contentChecksum(content + chunk, agentId), // chunk in checksum keeps entries distinct per chunk
             tags,
           }));
 
@@ -1035,15 +1085,27 @@ export default definePluginEntry({
           },
 
           /**
-           * Compact: non-LLM structural compression.
-           * - Priority >= 75: kept verbatim
-           * - Priority < 75: compressed to topic lines (first sentence + topic)
-           * OpenClaw will continue to run its own auto-compaction after this returns
-           * if ownsCompaction=false (our setup).
+           * Compact: structural compression for session summarization.
+           *
+           * Noesis stores chunked entries with per-chunk checksums. When OpenClaw
+           * compacts a session, it produces a condensed summary and writes it back.
+           *
+           * Limitation: OpenClaw's generic compaction doesn't know about Noesis's
+           * chunk structure. If it writes back a condensed entry, Noesis will treat
+           * it as a new entry (new checksum, new ID). The original fragmented
+           * chunks remain in the DB until the next cleanup run picks them up via
+           * expiresAt, or until a future compaction pass handles the dedup.
+           *
+           * A proper fix would: (1) detect that OpenClaw wrote a condensed entry
+           * for this session, (2) compute its checksum, (3) check if an entry with
+           * that checksum already exists via db.getByChecksum(), and (4) delete
+           * the session's fragmented entries if the condensed entry is a duplicate.
+           * This requires additional state tracking and is deferred for now.
+           *
+           * Current behavior: defer to OpenClaw's compaction output, accept that
+           * fragmented chunks accumulate until TTL cleanup removes them.
            */
           async compact({ sessionId, force }) {
-            // Non-owning engine — OpenClaw handles actual compaction.
-            // This hook exists so we don't break the /compact flow.
             return { ok: true, compacted: false };
           },
 
@@ -1138,9 +1200,13 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
 
   // 6. Optional: auto-cleanup expired entries on startup
   if (config.autoCleanup) {
+    warnOnLargeCleanupGap(log);
     try {
       const archived = await db.archiveExpired();
-      if (archived > 0) log(`[noesis] Archived ${archived} expired entries.`);
+      if (archived > 0) {
+        log(`[noesis] Archived ${archived} expired entries.`);
+        setLastCleanupTimestamp(Date.now());
+      }
     } catch (err) {
       log(`[noesis] Cleanup skipped: ${err}`);
       logError("Startup cleanup failed", { error: err, extra: { autoCleanup: true } });
@@ -1152,7 +1218,12 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
     const intervalMs = config.cleanupIntervalHours * 60 * 60 * 1000;
     cleanupIntervalId = setInterval(() => {
       db!.archiveExpired()
-        .then((n) => { if (n > 0) log(`[noesis] Periodic cleanup archived ${n} entries.`); })
+        .then((n) => {
+          if (n > 0) {
+            log(`[noesis] Periodic cleanup archived ${n} entries.`);
+            setLastCleanupTimestamp(Date.now());
+          }
+        })
         .catch((err) => {
           log(`[noesis] Periodic cleanup error: ${err}`);
           logError("Periodic cleanup failed", { error: err, extra: { cleanupIntervalHours: config.cleanupIntervalHours } });
@@ -1203,5 +1274,8 @@ function buildConfig(raw: Record<string, unknown>): NoesisConfig {
     assembleMaxEntries: Number(raw.assembleMaxEntries ?? DEFAULT_CONFIG.assembleMaxEntries),
     assembleMaxAgeDays: Number(raw.assembleMaxAgeDays ?? DEFAULT_CONFIG.assembleMaxAgeDays),
     errorLogPath: String(raw.errorLogPath ?? DEFAULT_CONFIG.errorLogPath),
+    vectorWeight: Number(raw.vectorWeight ?? DEFAULT_CONFIG.vectorWeight),
+    rerank: Boolean(raw.rerank ?? DEFAULT_CONFIG.rerank),
+    rerankerEndpoint: raw.rerankerEndpoint ? String(raw.rerankerEndpoint) : undefined,
   };
 }

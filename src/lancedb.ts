@@ -11,6 +11,7 @@ import path from "path";
 import os from "os";
 import fs from "fs";
 import { MemoryEntry, MemoryType, NoesisConfig, NoesisStats } from "./types.js";
+import { logError } from "./logger.js";
 
 const TABLE_NAME = "memories";
 const ARCHIVE_TABLE_NAME = "memories_archive";
@@ -111,19 +112,26 @@ export class NoesisDB {
     if (entries.length === 0) return 0;
     const tbl = this.getTable();
 
-    // Dedup: check existing checksums in batch
+    // Dedup: check existing checksums in batch.
+    // Batch into groups of 100 to avoid query size limits with large IN clauses.
     const checksums = entries.map((e) => e.checksum);
-    const quotedChecksums = checksums.map((c) => `'${c}'`).join(", ");
+    const existingChecksums = new Set<string>();
+    const BATCH_SIZE = 100;
 
-    let existingChecksums = new Set<string>();
     try {
-      const existing = await tbl
-        .query()
-        .where(`checksum IN (${quotedChecksums})`)
-        .select(["checksum"])
-        .limit(checksums.length + 1)
-        .toArray();
-      existingChecksums = new Set(existing.map((r: any) => String(r.checksum)));
+      for (let i = 0; i < checksums.length; i += BATCH_SIZE) {
+        const batch = checksums.slice(i, i + BATCH_SIZE);
+        const quotedBatch = batch.map((c) => `'${c}'`).join(", ");
+        const existing = await tbl
+          .query()
+          .where(`checksum IN (${quotedBatch})`)
+          .select(["checksum"])
+          .limit(batch.length + 1)
+          .toArray();
+        for (const r of existing as any[]) {
+          existingChecksums.add(String(r.checksum));
+        }
+      }
     } catch {
       // table might be empty — that's fine
     }
@@ -278,6 +286,9 @@ export class NoesisDB {
     const filters: string[] = [];
     if (agentId) filters.push(`agentId = '${escapeFilterValue(agentId)}'`);
     if (sessionId) filters.push(`sessionId = '${escapeFilterValue(sessionId)}'`);
+    // Filter out expired entries (TTL reached but not yet archived)
+    const now = Date.now();
+    filters.push(`(expiresAt = 0 OR expiresAt > ${now})`);
 
     let query = tbl
       .query()
@@ -292,6 +303,25 @@ export class NoesisDB {
     return (results as any[])
       .map(rowToEntry)
       .sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  /**
+   * Retrieve an entry by its content checksum (idempotent upsert lookup).
+   */
+  async getByChecksum(checksum: string): Promise<MemoryEntry | null> {
+    const tbl = this.getTable();
+    try {
+      const results = await tbl
+        .query()
+        .where(`checksum = '${checksum.replace(/'/g, "''")}'`)
+        .select(["id", "agentId", "sessionId", "content", "chunk", "embedding", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"])
+        .limit(1)
+        .toArray();
+      if (results.length === 0) return null;
+      return rowToEntry(results[0] as any);
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -595,8 +625,9 @@ export class NoesisDB {
         });
       }
       this.indexCreated = true;
-    } catch {
-      // Index creation is best-effort — ANN just won't be used
+    } catch (err) {
+      // Index creation is best-effort — ANN just won't be used, but log so operator knows
+      logError("Failed to create ANN index", { error: err, extra: { table: "memories" } });
     }
   }
 
@@ -622,8 +653,8 @@ export class NoesisDB {
         });
       }
       (this as any).archiveIndexCreated = true;
-    } catch {
-      // Index creation is best-effort
+    } catch (err) {
+      logError("Failed to create ANN index on archive table", { error: err, extra: { table: "memories_archive" } });
     }
   }
 
@@ -642,8 +673,8 @@ export class NoesisDB {
           config: lancedb.Index.fts(),
         });
       }
-    } catch {
-      // FTS index creation is best-effort
+    } catch (err) {
+      logError("Failed to create FTS index", { error: err, extra: { table: "memories" } });
     }
   }
 
@@ -659,8 +690,8 @@ export class NoesisDB {
           config: lancedb.Index.fts(),
         });
       }
-    } catch {
-      // FTS index creation is best-effort
+    } catch (err) {
+      logError("Failed to create FTS index on archive table", { error: err, extra: { table: "memories_archive" } });
     }
   }
 

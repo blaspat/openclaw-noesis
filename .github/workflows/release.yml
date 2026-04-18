@@ -32,36 +32,24 @@ jobs:
           cache: 'npm'
 
       - name: Install & Build
-        run: |
-          echo "DEBUG: $(pwd)" && ls -la
-          npm ci && npm run build
+        run: npm ci && npm run build
 
       - name: Publish to npm
         run: NODE_AUTH_TOKEN="" npm publish
-
-      - name: Upload dist artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist-${{ github.sha }}
-          path: dist/
-          retention-days: 1
 
   publish-gh-release:
     needs: build-and-publish
     runs-on: ubuntu-latest
     steps:
-      - name: Download dist artifact
-        uses: actions/download-artifact@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          name: dist-${{ github.sha }}
-          path: dist/
+          ref: main
+          fetch-depth: 0
 
       - name: Create GitHub Release
         run: |
           VERSION=$(node -p "require('./package.json').version")
           gh release create "$VERSION" \
             --generate-notes \
-            --repo ${{ github.repository }} \
-            dist/*.js \
-            dist/*.d.ts \
-            dist/*.js.map
+            --repo ${{ github.repository }}

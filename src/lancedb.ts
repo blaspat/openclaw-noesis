@@ -11,6 +11,7 @@ import path from "path";
 import os from "os";
 import fs from "fs";
 import { MemoryEntry, MemoryType, NoesisConfig, NoesisStats } from "./types.js";
+import { logError } from "./logger.js";
 
 const TABLE_NAME = "memories";
 const ARCHIVE_TABLE_NAME = "memories_archive";
@@ -625,8 +626,8 @@ export class NoesisDB {
       }
       this.indexCreated = true;
     } catch (err) {
-      // Index creation is best-effort — ANN just won't be used, but warn so operator knows
-      console.warn(`[noesis/lancedb] Failed to create ANN index: ${err}`);
+      // Index creation is best-effort — ANN just won't be used, but log so operator knows
+      logError("Failed to create ANN index", { error: err, extra: { table: "memories" } });
     }
   }
 
@@ -653,7 +654,7 @@ export class NoesisDB {
       }
       (this as any).archiveIndexCreated = true;
     } catch (err) {
-      console.warn(`[noesis/lancedb] Failed to create ANN index on archive table: ${err}`);
+      logError("Failed to create ANN index on archive table", { error: err, extra: { table: "memories_archive" } });
     }
   }
 
@@ -673,7 +674,7 @@ export class NoesisDB {
         });
       }
     } catch (err) {
-      console.warn(`[noesis/lancedb] Failed to create FTS index: ${err}`);
+      logError("Failed to create FTS index", { error: err, extra: { table: "memories" } });
     }
   }
 
@@ -690,7 +691,7 @@ export class NoesisDB {
         });
       }
     } catch (err) {
-      console.warn(`[noesis/lancedb] Failed to create FTS index on archive table: ${err}`);
+      logError("Failed to create FTS index on archive table", { error: err, extra: { table: "memories_archive" } });
     }
   }
 

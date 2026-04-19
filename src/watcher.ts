@@ -12,54 +12,7 @@ export interface SessionWatcher {
   close(): void;
 }
 
-/**
- * Start watching QMD session files and indexing them as they're written.
- * Watches all session file locations:
- *   - ~/.openclaw/sessions/<sessionId>.jsonl
- *   - ~/.openclaw/sessions/<agentId>/<sessionId>.jsonl
- *   - ~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl
- *   - ~/.openclaw/agents/<agentId>/qmd/sessions/<sessionId>.jsonl
- *
- * Debounce logic: each file change resets a 2s debounce timer. Indexing is
- * serialized per-file — a new debounce is scheduled if changes arrive while
- * an indexing operation is in-flight (prevents race condition where mid-index
- * writes get silently dropped).
- *
- * Race condition fix: if the file's size changed between the start and end of
- * indexSessionFile (detected via fs.stat), the file was still being written
- * when we read it. Re-debounce instead of treating the partial content as final.
- *
- * Returns a handle with a close() method for cleanup.
- */
-export function startQmdWatcher(
-  db: NoesisDB,
-  ollama: OllamaClient,
-  config: NoesisConfig,
-  logger?: (msg: string) => void
-): SessionWatcher {
-  // Chokidar-based watcher disabled — session scanning is done by startSessionScanner (interval-based).
-  logger?.(`[noesis/watcher] Session watcher disabled (using interval scanner)`);
-  return { close() {} };
-}
-
 const AGENTS_PATH = path.join(os.homedir(), ".openclaw", "agents");
-
-/**
- * Watch agent memory directories for changes and auto-index .md files.
- * Watches: ~/.openclaw/agents/<agentId>/workspace/memory/*.md
- *
- * On add/change: parse markdown, split by ## headings, infer memory type,
- * chunk, embed, and upsert to LanceDB. Checksum dedup prevents duplicates.
- */
-export function startMemoryWatcher(
-  db: NoesisDB,
-  ollama: OllamaClient,
-  config: NoesisConfig,
-  logger?: (msg: string) => void
-): SessionWatcher {
-  // Memory dir watching handled by startSessionScanner (interval-based).
-  return { close() {} };
-}
 
 // ─── Memory file indexer ───────────────────────────────────────────────
 

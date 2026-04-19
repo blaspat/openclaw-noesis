@@ -18,7 +18,7 @@ import { autoConfigOllama, OllamaClient, contentChecksum, chunkText } from "./ol
 import { NoesisDB } from "./lancedb.js";
 import { hybridSearch, cosineSimilarityDense } from "./search.js";
 import { importMarkdownFiles, importAllAgents } from "./migrator.js";
-import { startQmdWatcher, SessionWatcher, startMemoryWatcher, startSessionScanner, SessionScanner } from "./watcher.js";
+import { SessionWatcher, startSessionScanner, SessionScanner } from "./watcher.js";
 import {
   logError,
   logFatal,

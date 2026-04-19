@@ -1213,16 +1213,8 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
     }
   }
 
-  // 5. Optional: watch agent memory dirs
-  if (config.watchMemoryDirs) {
-    try {
-      memoryWatcher = startMemoryWatcher(db, ollama, config, safeLog);
-    } catch (err) {
-      logError("Failed to start memory dir watcher", { error: err, extra: { watchMemoryDirs: true } });
-    }
-  }
-
-  // 6. Optional: auto-cleanup expired entries on startup
+ 
+  // 5. Optional: auto-cleanup expired entries on startup
   if (config.autoCleanup) {
     warnOnLargeCleanupGap(log);
     try {
@@ -1237,7 +1229,7 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
     }
   }
 
-  // 7. Optional: periodic TTL cleanup on interval
+  // 6. Optional: periodic TTL cleanup on interval
   if (config.cleanupIntervalHours > 0) {
     const intervalMs = config.cleanupIntervalHours * 60 * 60 * 1000;
     cleanupIntervalId = setInterval(() => {

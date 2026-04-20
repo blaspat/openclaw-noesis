@@ -454,6 +454,46 @@ export class NoesisDB {
   }
 
   /**
+   * Optimize the LanceDB tables to reclaim disk space and reduce memory usage.
+   *
+   * LanceDB uses MVCC — every write creates version files in _versions/.
+   * Without periodic optimize(), these accumulate indefinitely and consume
+   * both disk and memory (via memory-mapped I/O).
+   *
+   * This runs on the active memories table and the archive table.
+   * Call this from the periodic cleanup interval or as a one-time repair.
+   *
+   * @param olderThanMs - Reclaim versions older than this many ms. Default: 24h.
+   */
+  async optimize(olderThanMs: number = 24 * 60 * 60 * 1000): Promise<void> {
+    const cleanupOlderThan = new Date(Date.now() - olderThanMs);
+
+    // Optimize active table
+    try {
+      const tbl = this.getTable();
+      const stats = await tbl.optimize({
+        cleanupOlderThan,
+        deleteUnverified: true,
+      });
+      const removed = stats.prune.oldVersionsRemoved;
+      logError?.(`[noesis/lancedb] optimize() complete — old versions removed: ${removed}`);
+    } catch (err) {
+      logError?.(`[noesis/lancedb] optimize() failed on active table: ${err}`);
+    }
+
+    // Optimize archive table
+    try {
+      const archiveTbl = this.getArchiveTable();
+      await archiveTbl.optimize({
+        cleanupOlderThan,
+        deleteUnverified: true,
+      });
+    } catch {
+      // archive table may not be initialized — skip
+    }
+  }
+
+  /**
    * Count entries in the archive table.
    */
   async countArchive(): Promise<number> {

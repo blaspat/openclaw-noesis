@@ -81,6 +81,7 @@ let sessionScanner: SessionScanner | null = null;
 let resolvedConfig: NoesisConfig = { ...DEFAULT_CONFIG };
 let initialized = false;
 let cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
+let optimizeIntervalId: ReturnType<typeof setInterval> | null = null;
 
 // ─── plugin entry ──────────────────────────────────────────────────────────
 
@@ -1229,7 +1230,17 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
     }
   }
 
-  // 6. Optional: periodic TTL cleanup on interval
+  // Always run optimize on startup to reclaim LanceDB version store.
+  // This removes orphaned version files from _versions/ that accumulate
+  // from repeated writes. Safe to run on every startup — LanceDB handles it.
+  try {
+    await db.optimize();
+    safeLog(`[noesis] Startup LanceDB optimize() complete.`);
+  } catch (err) {
+    safeLog(`[noesis] Startup optimize() skipped: ${err}`);
+  }
+
+  // 6. Optional: periodic TTL cleanup on configurable interval
   if (config.cleanupIntervalHours > 0) {
     const intervalMs = config.cleanupIntervalHours * 60 * 60 * 1000;
     cleanupIntervalId = setInterval(() => {
@@ -1247,6 +1258,20 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
     }, intervalMs);
     safeLog(`[noesis] Periodic cleanup scheduled every ${config.cleanupIntervalHours}h`);
   }
+
+  // 7. Hardcoded 5-minute interval for LanceDB optimize() to prevent version store bloat.
+  // Not configurable — this should run frequently to keep _versions/ lean.
+  optimizeIntervalId = setInterval(() => {
+    db!.optimize()
+      .then(() => {
+        safeLog(`[noesis] Periodic LanceDB optimize() complete.`);
+      })
+      .catch((err) => {
+        safeLog(`[noesis] Periodic optimize() error: ${err}`);
+        logError("Periodic optimize failed", { error: err });
+      });
+  }, 5 * 60 * 1000);
+  safeLog(`[noesis] Periodic LanceDB optimize() scheduled every 5min`);
 
   safeLog("[noesis] Initialization complete.");
 }

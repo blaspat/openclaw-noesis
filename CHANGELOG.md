@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.5.0](https://github.com/blaspat/openclaw-noesis/compare/v1.4.5...v1.5.0) (2026-04-20)
+
+
+### Features
+
+* **BREAKING** Replace Ollama with HuggingFace Transformers.js for CPU embeddings ([`ad39308`](https://github.com/blaspat/openclaw-noesis/commit/ad39308))
+  * New `transformers.ts` backend — WASM/SIMD in-process, no Ollama server needed
+  * Auto-downloads `nomic-ai/nomic-embed-text-v1.5` ONNX (q4f16) from HuggingFace on first use
+  * Graceful degradation with zero vectors on embed failure
+  * Timeout protection (60s model load, 30s per embed)
+
+
 ## [1.2.0](https://github.com/blaspat/openclaw-noesis/compare/v1.1.10...v1.2.0) (2026-04-16)
 
 

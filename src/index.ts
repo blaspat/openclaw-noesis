@@ -2,7 +2,7 @@
  * Noesis — Local-first semantic memory plugin for OpenClaw
  *
  * Memory slot: plugins.slots.memory = "noesis"
- * Stack: LanceDB (vector store) + Ollama (embeddings) + BM25 + MMR
+ * Stack: LanceDB (vector store) + HuggingFace Transformers.js (embeddings) + BM25 + MMR
  * No cloud. No API keys. Fully local.
  */
 
@@ -14,7 +14,7 @@ import path from "path";
 import fs from "fs";
 
 import { DEFAULT_CONFIG, MemoryEntry, MemoryType, NoesisConfig } from "./types.js";
-import { autoConfigOllama, OllamaClient, contentChecksum, chunkText } from "./ollama.js";
+import { autoConfigTransformers, EmbeddingClient, contentChecksum, chunkText } from "./transformers.js";
 import { NoesisDB } from "./lancedb.js";
 import { hybridSearch, cosineSimilarityDense } from "./search.js";
 import { importMarkdownFiles, importAllAgents } from "./migrator.js";
@@ -74,7 +74,7 @@ function warnOnLargeCleanupGap(log: (msg: string) => void): void {
 }
 
 let db: NoesisDB | null = null;
-let ollama: OllamaClient | null = null;
+let ollama: EmbeddingClient | null = null;
 let watcher: SessionWatcher | null = null;
 let memoryWatcher: SessionWatcher | null = null;
 let sessionScanner: SessionScanner | null = null;
@@ -88,7 +88,7 @@ export default definePluginEntry({
   id: "noesis",
   name: "Noesis Memory",
   description:
-    "Local-first semantic memory for OpenClaw — LanceDB + Ollama, no cloud required. Hybrid search (vector + BM25 + MMR), cross-agent recall, QMD session indexing, and memory slot integration.",
+    "Local-first semantic memory for OpenClaw — LanceDB + Transformers.js (WASM/SIMD), no cloud required. Hybrid search (vector + BM25 + MMR), cross-agent recall, QMD session indexing, and memory slot integration.",
 
   register(api) {
     // Merge user config with defaults
@@ -508,7 +508,7 @@ export default definePluginEntry({
             `Total archive entries: ${stats.archiveEntries}`,
             `DB path: ${stats.dbPath}`,
             `Embedding model: ${stats.embeddingModel}`,
-            `Ollama endpoint: ${stats.ollamaEndpoint}`,
+            `Embedding model: ${stats.embeddingModel}`,
             ``,
             `Active — by agent: ${JSON.stringify(stats.byAgent, null, 2)}`,
             `Active — by type: ${JSON.stringify(stats.byMemoryType, null, 2)}`,
@@ -1161,11 +1161,11 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
     throw err;
   }
 
-  // 2. Auto-configure Ollama
+  // 2. Auto-configure Transformers.js embedding model
   try {
-    ollama = await autoConfigOllama(config.ollamaEndpoint, config.embeddingModel, log);
+    ollama = await autoConfigTransformers(config.embeddingModel, log);
   } catch (err) {
-    logError("Failed to auto-configure Ollama", { error: err });
+    logError("Failed to auto-configure Transformers.js embedding model", { error: err });
     throw err;
   }
 
@@ -1175,7 +1175,7 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
     const testEmbed = await ollama.embed("noesis init");
     embeddingDim = testEmbed.length;
   } catch (err) {
-    logError("Failed to get embedding dimension from Ollama", { error: err });
+    logError("Failed to get embedding dimension from Transformers.js", { error: err });
     throw err;
   }
 
@@ -1258,7 +1258,7 @@ async function ensureInitialized(): Promise<void> {
   const start = Date.now();
   while (!initialized) {
     if (Date.now() - start > 30_000) {
-      throw new Error("[noesis] Initialization timeout — Ollama may not be running. Start with: ollama serve");
+      throw new Error("[noesis] Initialization timeout — Transformers.js model may have failed to load. Check error log.");
     }
     await new Promise((r) => setTimeout(r, 200));
   }

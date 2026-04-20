@@ -1,8 +1,8 @@
 {
   "id": "noesis",
   "name": "Noesis Memory",
-  "description": "Local-first semantic memory + context engine for OpenClaw. LanceDB + Ollama, no cloud. Hybrid search, cross-agent recall, and proactive context assembly (assemble/ingest hooks). Zero LLM cost.",
-  "version": "1.4.5",
+  "description": "Local-first semantic memory + context engine for OpenClaw. LanceDB + Transformers.js (WASM/SIMD CPU), no cloud. Hybrid search, cross-agent recall, and proactive context assembly (assemble/ingest hooks). Zero LLM cost.",
+  "version": "1.5.0",
   "kind": "memory",
   "configSchema": {
     "type": "object",
@@ -15,13 +15,13 @@
       },
       "ollamaEndpoint": {
         "type": "string",
-        "default": "http://localhost:11434",
-        "description": "Ollama API endpoint"
+        "default": "none",
+        "description": "Deprecated. Ollama is no longer used. Kept for backward compat only."
       },
       "embeddingModel": {
         "type": "string",
-        "default": "nomic-embed-text",
-        "description": "Ollama embedding model. Options: nomic-embed-text (768d, fast), mxbai-embed-large (1024d, accurate)"
+        "default": "nomic-ai/nomic-embed-text-v1.5",
+        "description": "HuggingFace model ID for text embeddings. Model is auto-downloaded on first use. Quantized ONNX (q4f16) variant is used automatically for best CPU performance."
       },
       "chunkSize": {
         "type": "number",

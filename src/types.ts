@@ -80,8 +80,8 @@ export interface NoesisConfig {
 
 export const DEFAULT_CONFIG: NoesisConfig = {
   lanceDbPath: "~/.openclaw/noesis/db",
-  ollamaEndpoint: "http://localhost:11434",
-  embeddingModel: "nomic-embed-text",
+  ollamaEndpoint: "none",   // deprecated, no longer used
+  embeddingModel: "nomic-ai/nomic-embed-text-v1.5",
   chunkSize: 512,
   chunkOverlap: 64,
   topK: 6,

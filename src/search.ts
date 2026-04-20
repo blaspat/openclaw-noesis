@@ -4,7 +4,7 @@
  * Pipeline: vector ANN → BM25 keyword → hybrid merge → MMR rerank
  */
 
-import { OllamaClient } from "./ollama.js";
+import { EmbeddingClient } from "./transformers.js";
 import { NoesisDB } from "./lancedb.js";
 import { MemoryType, NoesisConfig, SearchResult } from "./types.js";
 
@@ -32,7 +32,7 @@ export interface HybridSearchOptions {
  */
 export async function hybridSearch(
   query: string,
-  ollama: OllamaClient,
+  ollama: EmbeddingClient,
   db: NoesisDB,
   config: NoesisConfig,
   options: HybridSearchOptions = {}
@@ -259,7 +259,7 @@ export function cosineSimilarityDense(a: number[], b: number[]): number {
 async function crossEncoderRerank(
   query: string,
   candidates: Array<{ id: string; agentId: string; sessionId: string; content: string; memoryType: string; createdAt: number; sourcePath: string; tags: string[]; score: number; priority?: number; expiresAt?: number }>,
-  ollama: OllamaClient,
+  ollama: EmbeddingClient,
   topK: number,
   scoreMap: Map<string, { result: any; score: number }>
 ): Promise<typeof candidates> {

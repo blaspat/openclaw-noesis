@@ -1,7 +1,7 @@
 /**
  * Noesis — MD → LanceDB migrator
  *
- * Scans agent memory files, chunks them, embeds via Ollama,
+ * Scans agent memory files, chunks them, embeds via Transformers.js,
  * and upserts to LanceDB. Fully idempotent via checksum dedup.
  */
 
@@ -9,7 +9,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { randomUUID } from "crypto";
-import { OllamaClient, chunkText, contentChecksum } from "./ollama.js";
+import { EmbeddingClient, chunkText, contentChecksum } from "./transformers.js";
 import { NoesisDB } from "./lancedb.js";
 import { ImportResult, MemoryEntry, MemoryType, NoesisConfig } from "./types.js";
 
@@ -24,7 +24,7 @@ const BATCH_SIZE = 10; // embed in batches to control Ollama load
 export async function importMarkdownFiles(
   agentId: string,
   db: NoesisDB,
-  ollama: OllamaClient,
+  ollama: EmbeddingClient,
   config: NoesisConfig,
   logger?: (msg: string) => void
 ): Promise<ImportResult> {
@@ -132,7 +132,7 @@ export async function importMarkdownFiles(
  */
 export async function importAllAgents(
   db: NoesisDB,
-  ollama: OllamaClient,
+  ollama: EmbeddingClient,
   config: NoesisConfig,
   logger?: (msg: string) => void
 ): Promise<ImportResult[]> {

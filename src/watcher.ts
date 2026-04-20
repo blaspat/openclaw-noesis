@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { randomUUID } from "crypto";
-import { OllamaClient, chunkText, contentChecksum } from "./ollama.js";
+import { EmbeddingClient, chunkText, contentChecksum } from "./transformers.js";
 import { NoesisDB } from "./lancedb.js";
 import { MemoryEntry, MemoryType, NoesisConfig } from "./types.js";
 
@@ -59,7 +59,7 @@ function autoPriorityForType(memoryType: MemoryType): number {
 async function indexMemoryFile(
   filePath: string,
   db: NoesisDB,
-  ollama: OllamaClient,
+  ollama: EmbeddingClient,
   config: NoesisConfig,
   logger?: (msg: string) => void
 ): Promise<number> {
@@ -187,7 +187,7 @@ export function parseSessionPath(filePath: string): { agentId: string; sessionId
 export async function indexSessionFile(
   filePath: string,
   db: NoesisDB,
-  ollama: OllamaClient,
+  ollama: EmbeddingClient,
   config: NoesisConfig,
   logger?: (msg: string) => void
 ): Promise<void> {
@@ -303,7 +303,7 @@ export interface SessionScanner {
  */
 export function startSessionScanner(
   db: NoesisDB,
-  ollama: OllamaClient,
+  ollama: EmbeddingClient,
   config: NoesisConfig,
   logger?: (msg: string) => void
 ): SessionScanner {
@@ -340,6 +340,7 @@ export function startSessionScanner(
         } catch {
           // continue
         }
+        logger?.(`[noesis/scanner] ${agentDir}: scanning ${files.length} session file(s)`);
         for (const file of files) {
           const filePath = path.join(sessionsDir, file);
           if (inflight.has(filePath)) continue;

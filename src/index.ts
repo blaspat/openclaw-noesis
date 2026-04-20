@@ -1229,16 +1229,32 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
     }
   }
 
-  // 6. Optional: periodic TTL cleanup on interval
+  // Always run optimize on startup to reclaim LanceDB version store.
+  // This removes orphaned version files from _versions/ that accumulate
+  // from repeated writes. Safe to run on every startup — LanceDB handles it.
+  try {
+    await db.optimize();
+    safeLog(`[noesis] Startup LanceDB optimize() complete.`);
+  } catch (err) {
+    safeLog(`[noesis] Startup optimize() skipped: ${err}`);
+  }
+
+  // 6. Optional: periodic TTL cleanup + LanceDB version compaction on interval
   if (config.cleanupIntervalHours > 0) {
     const intervalMs = config.cleanupIntervalHours * 60 * 60 * 1000;
     cleanupIntervalId = setInterval(() => {
+      // Run both cleanup operations sequentially
       db!.archiveExpired()
         .then((n) => {
           if (n > 0) {
             safeLog(`[noesis] Periodic cleanup archived ${n} entries.`);
             setLastCleanupTimestamp(Date.now());
           }
+          // Also run optimize to reclaim LanceDB version store disk/memory
+          return db!.optimize();
+        })
+        .then(() => {
+          safeLog(`[noesis] Periodic LanceDB optimize() complete.`);
         })
         .catch((err) => {
           safeLog(`[noesis] Periodic cleanup error: ${err}`);

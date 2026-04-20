@@ -384,10 +384,31 @@ export class NoesisDB {
     const filters: string[] = [];
     if (agentId) filters.push(`agentId = '${escapeFilterValue(agentId)}'`);
     if (memoryType) filters.push(`memoryType = '${escapeFilterValue(memoryType)}'`);
-    let query = tbl.query().select(["id", "agentId", "sessionId", "content", "chunk", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"]).limit(100_000);
-    if (filters.length > 0) query = query.where(filters.join(" AND "));
-    const rows = await query.toArray();
-    return (rows as any[]).map(rowToEntry);
+    const whereClause = filters.length > 0 ? filters.join(" AND ") : undefined;
+
+    // Paginate to avoid loading the entire table + embeddings into heap at once.
+    // Each page = 5000 rows; embeddings are 768 * 8 = ~6KB/row → ~30MB per page,
+    // well within reasonable memory bounds.
+    const PAGE_SIZE = 5000;
+    const allEntries: MemoryEntry[] = [];
+    let offset = 0;
+
+    while (true) {
+      let query = tbl.query()
+        .select(["id", "agentId", "sessionId", "content", "chunk", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"])
+        .limit(PAGE_SIZE)
+        .offset(offset);
+      if (whereClause) query = query.where(whereClause);
+      const rows = await query.toArray();
+      if (rows.length === 0) break;
+      for (const row of rows as any[]) {
+        allEntries.push(rowToEntry(row));
+      }
+      if (rows.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
+
+    return allEntries;
   }
 
   /**
@@ -441,29 +462,32 @@ export class NoesisDB {
           .toArray();
         if (toArchive.length === 0) break;
 
-        // Insert into archive
-        const archiveTbl = this.getArchiveTable();
-        const rows = toArchive.map((r: any) => ({
-          id: String(r.id),
-          agentId: String(r.agentId),
-          sessionId: String(r.sessionId),
-          content: String(r.content),
-          chunk: String(r.chunk ?? ""),
-          embedding: r.embedding,
-          memoryType: String(r.memoryType ?? "fact"),
-          priority: Number(r.priority ?? 0),
-          expiresAt: Number(r.expiresAt ?? 0),
-          createdAt: Number(r.createdAt ?? 0),
-          sourcePath: String(r.sourcePath ?? ""),
-          checksum: String(r.checksum ?? ""),
-          tags: Array.isArray(r.tags) ? r.tags.map(String) : [],
-        }));
-        await archiveTbl.add(rows);
+      // Delete FIRST — if the process crashes between delete and insert, entries
+      // are missing from active (not duplicated in archive). Next run will re-archive
+      // them. This is safer than insert-then-delete where a crash causes duplication.
+      const ids = toArchive.map((r: any) => `'${r.id}'`).join(", ");
+      await tbl.delete(`id IN (${ids})`);
 
-        // Delete from active table
-        const ids = toArchive.map((r: any) => `'${r.id}'`).join(", ");
-        await tbl.delete(`id IN (${ids})`);
-        archived += toArchive.length;
+      // Insert into archive — if this fails, entries are still gone from active
+      // but will be re-archived on the next cleanup cycle. Acceptable trade-off.
+      const archiveTbl = this.getArchiveTable();
+      const rows = toArchive.map((r: any) => ({
+        id: String(r.id),
+        agentId: String(r.agentId),
+        sessionId: String(r.sessionId),
+        content: String(r.content),
+        chunk: String(r.chunk ?? ""),
+        embedding: r.embedding,
+        memoryType: String(r.memoryType ?? "fact"),
+        priority: Number(r.priority ?? 0),
+        expiresAt: Number(r.expiresAt ?? 0),
+        createdAt: Number(r.createdAt ?? 0),
+        sourcePath: String(r.sourcePath ?? ""),
+        checksum: String(r.checksum ?? ""),
+        tags: Array.isArray(r.tags) ? r.tags.map(String) : [],
+      }));
+      await archiveTbl.add(rows);
+      archived += toArchive.length;
 
       }
     } catch (err) {

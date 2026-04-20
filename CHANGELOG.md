@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.5.1](https://github.com/blaspat/openclaw-noesis/compare/v1.5.0...v1.5.1) (2026-04-20)
+
+
+### Bug Fixes
+
+* Fix LanceDB version store memory leak by adding periodic `optimize()` calls
+  * Add `db.optimize()` method to reclaim `_versions/` directory (was 4.4GB)
+  * Run `optimize()` on every startup to immediately reclaim bloated version store
+  * Run `optimize()` on hardcoded 5-minute interval to keep version store lean
+
+
 ## [1.5.0](https://github.com/blaspat/openclaw-noesis/compare/v1.4.5...v1.5.0) (2026-04-20)
 
 

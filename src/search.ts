@@ -45,23 +45,19 @@ export async function hybridSearch(
   // 1. Embed the query
   const queryEmbedding = await ollama.embed(query);
 
-  // 2. Vector search (expanded candidate set)
+  // 2. Vector search (expanded candidate set — 3x to catch high-priority entries without a second query)
   const vectorResults = await db.vectorSearch(
     queryEmbedding,
-    topK * 2,
+    topK * 3,
     options.agentId,
     options.memoryType,
     options.crossAgent
   );
 
-  // 3. BM25 full-text search
-  const bm25Results = await db.fullTextSearch(
-    query,
-    topK,
-    options.agentId,
-    options.memoryType,
-    options.crossAgent
-  );
+  // 3. BM25 full-text search (skip when pure vector mode)
+  const bm25Results = vectorWeight < 1.0
+    ? await db.fullTextSearch(query, topK, options.agentId, options.memoryType, options.crossAgent)
+    : [];
 
   // 4. Hybrid merge (active table only — expired entries live in archive, not here)
   const scoreMap = new Map<string, { result: typeof vectorResults[0]; score: number }>();
@@ -86,16 +82,9 @@ export async function hybridSearch(
     .sort((a, b) => b.score - a.score)
     .slice(0, topK * 2);
 
-  // 5. Always include high-priority entries (priority >= 75) regardless of score
-  const priorityBoost = new Set(merged.map((m) => m.result.id));
-  const highPriorityResults = await db.vectorSearch(queryEmbedding, topK, options.agentId, options.memoryType, options.crossAgent);
-  for (const r of highPriorityResults) {
-    if (r.priority >= 75 && !priorityBoost.has(r.id)) {
-      merged.push({ result: r, score: 0 }); // score 0 but will be sorted to top by priority boost
-    }
-  }
-
-  // Sort again with priority boost
+  // 5. Priority boost: ensure high-priority entries (>= 75) are included from the expanded set.
+  //    Already fetched topK*3 above so high-priority entries should be present;
+  //    sort them to the top without a second DB query.
   const withPriority = merged.sort((a, b) => {
     const ap = (a.result as any).priority ?? 0;
     const bp = (b.result as any).priority ?? 0;
@@ -112,7 +101,7 @@ export async function hybridSearch(
   //    thematically similar but factually different content). Uses cosine similarity
   //    between fresh query embedding and each candidate's stored embedding.
   const finalResults = options.rerank
-    ? await crossEncoderRerank(query, mmrResults, ollama, topK, scoreMap)
+    ? await crossEncoderRerank(queryEmbedding, mmrResults, ollama, topK, scoreMap)
     : mmrResults;
 
   return finalResults.map((r) => ({
@@ -257,16 +246,13 @@ export function cosineSimilarityDense(a: number[], b: number[]): number {
  * this is an approximation. Set rerank=false to disable.
  */
 async function crossEncoderRerank(
-  query: string,
+  queryEmbedding: number[],
   candidates: Array<{ id: string; agentId: string; sessionId: string; content: string; memoryType: string; createdAt: number; sourcePath: string; tags: string[]; score: number; priority?: number; expiresAt?: number }>,
   ollama: EmbeddingClient,
   topK: number,
   scoreMap: Map<string, { result: any; score: number }>
 ): Promise<typeof candidates> {
   if (candidates.length === 0) return [];
-
-  // Re-embed the query with Ollama (fresh embedding = current query intent)
-  const queryEmbedding = await ollama.embed(query);
 
   // Score each candidate by cosine similarity between query embedding and stored embedding.
   // We need the stored embedding per candidate — candidates don't carry embeddings

@@ -7,6 +7,7 @@
  */
 
 import { createHash } from "crypto";
+import os from "os";
 
 // Lazy-load the transformers package to avoid blocking startup if not installed
 let _transformers: typeof import("@huggingface/transformers") | null = null;
@@ -131,9 +132,9 @@ function createTransformersClient(
       return texts.map(() => new Array(EMBED_DIM).fill(0));
     }
 
-    // Run embeddings sequentially with concurrency control
-    // Transformers.js doesn't have native batch, so parallelize
-    const CONCURRENCY = 4;
+    // Run embeddings with concurrency scaled to available CPU cores.
+    // Transformers.js is CPU-bound; leave headroom for the Node.js event loop.
+    const CONCURRENCY = Math.max(1, os.cpus().length - 2);
     const results: number[][] = new Array(texts.length);
 
     for (let i = 0; i < texts.length; i += CONCURRENCY) {

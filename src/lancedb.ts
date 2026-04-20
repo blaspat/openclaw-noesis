@@ -170,13 +170,24 @@ export class NoesisDB {
     memoryType?: MemoryType,
     crossAgent?: boolean
   ): Promise<Array<{ id: string; agentId: string; sessionId: string; content: string; memoryType: string; createdAt: number; sourcePath: string; tags: string[]; score: number; priority: number; expiresAt: number }>> {
-    const tbl = this.getTable();
+    let tbl: ReturnType<typeof this.getTable>;
+    try {
+      tbl = this.getTable();
+    } catch {
+      return [];
+    }
 
-    let query = tbl
-      .vectorSearch(embedding)
-      .select(["id", "agentId", "sessionId", "content", "memoryType", "createdAt", "sourcePath", "tags"])
-      .limit(topK * 2)
-      .nprobes(this.config.annNprobe);
+    let query: ReturnType<typeof tbl.vectorSearch>;
+    try {
+      query = tbl
+        .vectorSearch(embedding)
+        .select(["id", "agentId", "sessionId", "content", "memoryType", "createdAt", "sourcePath", "tags"])
+        .limit(topK * 2)
+        .nprobes(this.config.annNprobe);
+    } catch (err) {
+      logError("vectorSearch() failed — ANN index may not be ready", { error: err });
+      return [];
+    }
 
     const filters: string[] = [];
     if (agentId && !crossAgent) {
@@ -189,20 +200,25 @@ export class NoesisDB {
       query = query.where(filters.join(" AND "));
     }
 
-    const results = await query.toArray();
-    return results.map((r: any) => ({
-      id: String(r.id),
-      agentId: String(r.agentId),
-      sessionId: String(r.sessionId),
-      content: String(r.content),
-      memoryType: String(r.memoryType),
-      createdAt: Number(r.createdAt),
-      sourcePath: String(r.sourcePath),
-      tags: Array.isArray(r.tags) ? r.tags.map(String) : [],
-      score: typeof r._distance === "number" ? 1 / (1 + r._distance) : 0,
-      priority: Number(r.priority ?? 0),
-      expiresAt: Number(r.expiresAt ?? 0),
-    }));
+    try {
+      const results = await query.toArray();
+      return results.map((r: any) => ({
+        id: String(r.id),
+        agentId: String(r.agentId),
+        sessionId: String(r.sessionId),
+        content: String(r.content),
+        memoryType: String(r.memoryType),
+        createdAt: Number(r.createdAt),
+        sourcePath: String(r.sourcePath),
+        tags: Array.isArray(r.tags) ? r.tags.map(String) : [],
+        score: typeof r._distance === "number" ? 1 / (1 + r._distance) : 0,
+        priority: Number(r.priority ?? 0),
+        expiresAt: Number(r.expiresAt ?? 0),
+      }));
+    } catch (err) {
+      logError("vectorSearch() query execution failed", { error: err });
+      return [];
+    }
   }
 
   /**

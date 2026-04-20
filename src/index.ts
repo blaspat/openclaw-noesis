@@ -29,6 +29,24 @@ import {
 
 // ─── plugin state (module-level singletons) ────────────────────────────────
 
+// ─── noise patterns — messages matching these are dropped before indexing ────────
+
+const NOISE_PATTERNS = [
+  "HEARTBEAT_OK",
+  "A scheduled reminder has been triggered",
+  "Execute your Session Startup sequence now",
+  "Queued messages from",
+  "Assistant output is not needed",
+  "NO_REPLY",
+];
+
+export function isNoiseMessage(text: string): boolean {
+  const trimmed = text.trim();
+  return NOISE_PATTERNS.some(
+    (p) => trimmed === p || trimmed.startsWith(p)
+  );
+}
+
 // ─── last-cleanup timestamp helpers ────────────────────────────────────────────
 
 const LAST_CLEANUP_FILE = path.join(os.homedir(), ".openclaw", "noesis", ".last-cleanup");
@@ -75,8 +93,6 @@ function warnOnLargeCleanupGap(log: (msg: string) => void): void {
 
 let db: NoesisDB | null = null;
 let ollama: EmbeddingClient | null = null;
-let watcher: SessionWatcher | null = null;
-let memoryWatcher: SessionWatcher | null = null;
 let sessionScanner: SessionScanner | null = null;
 let resolvedConfig: NoesisConfig = { ...DEFAULT_CONFIG };
 let initialized = false;
@@ -1126,6 +1142,21 @@ export default definePluginEntry({
     }
 
     api.logger.info(`[noesis] Plugin registered — ${Object.keys(api.pluginConfig ?? {}).length} config key(s)`);
+
+    // Graceful shutdown: clear intervals, close scanner, and disconnect LanceDB on gateway stop.
+    // Also reset module-level state so repeated reloads don't leak intervals or hold stale refs.
+    api.on("gateway_stop", async () => {
+      api.logger.info("[noesis] Shutting down...");
+      if (cleanupIntervalId !== null) { clearInterval(cleanupIntervalId); cleanupIntervalId = null; }
+      if (optimizeIntervalId !== null) { clearInterval(optimizeIntervalId); optimizeIntervalId = null; }
+      if (sessionScanner) { sessionScanner.close(); sessionScanner = null; }
+      if (db) {
+        await db.disconnect().catch((err: any) => api.logger.info(`[noesis] disconnect() error: ${err}`));
+        db = null;
+      }
+      initialized = false;
+      api.logger.info("[noesis] Shutdown complete.");
+    });
   },
 });
 
@@ -1261,8 +1292,10 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
 
   // 7. Hardcoded 5-minute interval for LanceDB optimize() to prevent version store bloat.
   // Not configurable — this should run frequently to keep _versions/ lean.
+  // Uses 1h older-than threshold (vs default 24h) to reclaim versions more aggressively
+  // and prevent _versions/ accumulation from rapid writes.
   optimizeIntervalId = setInterval(() => {
-    db!.optimize()
+    db!.optimize(60 * 60 * 1000) // 1h instead of 24h default
       .then(() => {
         safeLog(`[noesis] Periodic LanceDB optimize() complete.`);
       })

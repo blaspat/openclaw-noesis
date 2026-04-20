@@ -415,38 +415,41 @@ export class NoesisDB {
     const now = Date.now();
     let archived = 0;
     try {
-      // Select full rows for expired entries
-      const toArchive = await tbl
-        .query()
-        .where(`expiresAt > 0 AND expiresAt < ${now}`)
-        .select(["id", "agentId", "sessionId", "content", "chunk", "embedding", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"])
-        .limit(10_000)
-        .toArray();
-      if (toArchive.length === 0) return 0;
+      // Process expired entries in batches to avoid large queries.
+      while (true) {
+        const toArchive = await tbl
+          .query()
+          .where(`expiresAt > 0 AND expiresAt < ${now}`)
+          .select(["id", "agentId", "sessionId", "content", "chunk", "embedding", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"])
+          .limit(500)
+          .toArray();
+        if (toArchive.length === 0) break;
 
-      // Insert into archive
-      const archiveTbl = this.getArchiveTable();
-      const rows = toArchive.map((r: any) => ({
-        id: String(r.id),
-        agentId: String(r.agentId),
-        sessionId: String(r.sessionId),
-        content: String(r.content),
-        chunk: String(r.chunk ?? ""),
-        embedding: r.embedding,
-        memoryType: String(r.memoryType ?? "fact"),
-        priority: Number(r.priority ?? 0),
-        expiresAt: Number(r.expiresAt ?? 0),
-        createdAt: Number(r.createdAt ?? 0),
-        sourcePath: String(r.sourcePath ?? ""),
-        checksum: String(r.checksum ?? ""),
-        tags: Array.isArray(r.tags) ? r.tags.map(String) : [],
-      }));
-      await archiveTbl.add(rows);
+        // Insert into archive
+        const archiveTbl = this.getArchiveTable();
+        const rows = toArchive.map((r: any) => ({
+          id: String(r.id),
+          agentId: String(r.agentId),
+          sessionId: String(r.sessionId),
+          content: String(r.content),
+          chunk: String(r.chunk ?? ""),
+          embedding: r.embedding,
+          memoryType: String(r.memoryType ?? "fact"),
+          priority: Number(r.priority ?? 0),
+          expiresAt: Number(r.expiresAt ?? 0),
+          createdAt: Number(r.createdAt ?? 0),
+          sourcePath: String(r.sourcePath ?? ""),
+          checksum: String(r.checksum ?? ""),
+          tags: Array.isArray(r.tags) ? r.tags.map(String) : [],
+        }));
+        await archiveTbl.add(rows);
 
-      // Delete from active table
-      const ids = toArchive.map((r: any) => `'${r.id}'`).join(", ");
-      await tbl.delete(`id IN (${ids})`);
-      archived = toArchive.length;
+        // Delete from active table
+        const ids = toArchive.map((r: any) => `'${r.id}'`).join(", ");
+        await tbl.delete(`id IN (${ids})`);
+        archived += toArchive.length;
+
+      }
     } catch (err) {
       // archive table not ready — skip silently
     }

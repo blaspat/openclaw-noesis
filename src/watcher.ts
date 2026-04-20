@@ -5,6 +5,7 @@ import { randomUUID } from "crypto";
 import { EmbeddingClient, chunkText, contentChecksum } from "./transformers.js";
 import { NoesisDB } from "./lancedb.js";
 import { MemoryEntry, MemoryType, NoesisConfig } from "./types.js";
+import { isNoiseMessage } from "./index.js";
 
 const DEBOUNCE_MS = 2000;
 
@@ -234,8 +235,12 @@ export async function indexSessionFile(
         text = entry.text;
       }
 
-      if (text.trim().replace(/[\n\t\r]+/g, ' ').length > 20) {
-        texts.push(text.trim().replace(/[\n\t\r]+/g, ' '));
+      // Filter out noise messages before indexing.
+      if (isNoiseMessage(text)) return;
+
+      const cleaned = text.trim().replace(/[\n\t\r]+/g, ' ');
+      if (cleaned.length > 20) {
+        texts.push(cleaned);
       }
     } catch {
       // skip malformed lines

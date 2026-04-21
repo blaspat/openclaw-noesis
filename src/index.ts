@@ -98,6 +98,8 @@ let resolvedConfig: NoesisConfig = { ...DEFAULT_CONFIG };
 let initialized = false;
 let cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
 let optimizeIntervalId: ReturnType<typeof setInterval> | null = null;
+let _isArchiving = false;
+let _isOptimizing = false;
 
 // ─── plugin entry ──────────────────────────────────────────────────────────
 
@@ -1265,6 +1267,11 @@ async function initPlugin(config: NoesisConfig): Promise<void> {
   if (config.cleanupIntervalHours > 0) {
     const intervalMs = config.cleanupIntervalHours * 60 * 60 * 1000;
     cleanupIntervalId = setInterval(() => {
+      if (_isArchiving) {
+        logInfo(`[noesis] Skipping cleanup tick: previous archive still in progress`);
+        return;
+      }
+      _isArchiving = true;
       db!.archiveExpired()
         .then((n) => {
           if (n > 0) {
@@ -1275,7 +1282,8 @@ async function initPlugin(config: NoesisConfig): Promise<void> {
         .catch((err) => {
           logInfo(`[noesis] Periodic cleanup error: ${err}`);
           logError("Periodic cleanup failed", { error: err, extra: { cleanupIntervalHours: config.cleanupIntervalHours } });
-        });
+        })
+        .finally(() => { _isArchiving = false; });
     }, intervalMs);
     logInfo(`[noesis] Periodic cleanup scheduled every ${config.cleanupIntervalHours}h`);
   }
@@ -1285,6 +1293,11 @@ async function initPlugin(config: NoesisConfig): Promise<void> {
   // Uses 1h older-than threshold (vs default 24h) to reclaim versions more aggressively
   // and prevent _versions/ accumulation from rapid writes.
   optimizeIntervalId = setInterval(() => {
+    if (_isOptimizing) {
+      logInfo(`[noesis] Skipping optimize tick: previous optimize still in progress`);
+      return;
+    }
+    _isOptimizing = true;
     db!.optimize(60 * 60 * 1000) // 1h instead of 24h default
       .then(() => {
         logInfo(`[noesis] Periodic LanceDB optimize() complete.`);
@@ -1292,7 +1305,8 @@ async function initPlugin(config: NoesisConfig): Promise<void> {
       .catch((err) => {
         logInfo(`[noesis] Periodic optimize() error: ${err}`);
         logError("Periodic optimize failed", { error: err });
-      });
+      })
+      .finally(() => { _isOptimizing = false; });
   }, 5 * 60 * 1000);
   logInfo(`[noesis] Periodic LanceDB optimize() scheduled every 5min`);
 

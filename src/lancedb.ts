@@ -155,9 +155,28 @@ export class NoesisDB {
   }
 
   /**
+   * Wraps a promise with a timeout.  Rejects if `promise` doesn't settle within
+   * `ms` milliseconds — prevents a stuck operation from blocking the upsert queue.
+   */
+  private async withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const timer = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error(label + " timed out after " + ms + "ms")), ms);
+    });
+    try {
+      return await Promise.race([promise, timer]);
+    } finally {
+      clearTimeout(timeoutId!);
+    }
+  }
+
+  /**
    * Delete + re-insert for one checksum.  Called only from within the mutex.
    * Uses delete-before-insert to eliminate the read-then-insert race window.
-   * Returns 1 if the entry was inserted (new or re-inserted), 0 otherwise.
+   * Protected by a 30-second timeout — if the operation hangs, callers get
+   * an error rather than blocking the entire upsert queue indefinitely.
+   * Returns 1 if the entry was inserted (new), 0 if the checksum already
+   * existed, or throws if the operation timed out.
    */
   async _upsertOneChecksum(
     tbl: ReturnType<typeof this.getTable>,
@@ -166,11 +185,12 @@ export class NoesisDB {
   ): Promise<number> {
     let numDeleted = 0;
     try {
-      const result = await tbl.delete(`checksum = '${checksum}'`);
+      const delP = tbl.delete(`checksum = '${checksum}'`);
+      const result = await this.withTimeout(delP, 30_000, "delete checksum=" + checksum);
       numDeleted = result.numDeletedRows;
     } catch (err) {
-      console.error(`[DEBUG] delete for ${checksum} threw: ${err}`);
-      // table might be empty — delete is best-effort here
+      logError("Upsert delete failed", { error: err, extra: { checksum } });
+      throw err;
     }
     const rows = entries.map((e) => ({
       id: e.id,

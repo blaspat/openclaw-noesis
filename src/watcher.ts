@@ -391,20 +391,32 @@ export function startSessionScanner(
     }
   }
 
+  let _isScanning = false;
+
   const scanDirs = async () => {
-    if (!fs.existsSync(agentsPath)) return;
-    let agentDirs: string[] = [];
-    try {
-      agentDirs = fs.readdirSync(agentsPath).filter((d) => !d.startsWith("."));
-    } catch {
+    // Skip this tick if a previous scan is still running — prevents overlap
+    if (_isScanning) {
+      logger?.(`[noesis/scanner] Skipping tick: previous scan still in progress`);
       return;
     }
-    // Process agents in bounded concurrent batches
-    for (let i = 0; i < agentDirs.length; i += AGENT_CONCURRENCY) {
-      const batch = agentDirs.slice(i, i + AGENT_CONCURRENCY);
-      await Promise.allSettled(
-        batch.map((agentDir) => scanAgent(agentDir, agentsPath, inflight, db, ollama, config, logger))
-      );
+    _isScanning = true;
+    try {
+      if (!fs.existsSync(agentsPath)) return;
+      let agentDirs: string[] = [];
+      try {
+        agentDirs = fs.readdirSync(agentsPath).filter((d) => !d.startsWith("."));
+      } catch {
+        return;
+      }
+      // Process agents in bounded concurrent batches
+      for (let i = 0; i < agentDirs.length; i += AGENT_CONCURRENCY) {
+        const batch = agentDirs.slice(i, i + AGENT_CONCURRENCY);
+        await Promise.allSettled(
+          batch.map((agentDir) => scanAgent(agentDir, agentsPath, inflight, db, ollama, config, logger))
+        );
+      }
+    } finally {
+      _isScanning = false;
     }
   };
 

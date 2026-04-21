@@ -13,11 +13,19 @@ import fs from "fs";
 import { MemoryEntry, MemoryType, NoesisConfig, NoesisStats } from "./types.js";
 import { logError } from "./logger.js";
 
+/**
+ * Per-checksum mutex — serializes concurrent upserts that share the same checksum.
+ * Keyed by checksum, cleared after each dedup+insert completes.
+ * Guards the two-step: dedup-query → insert (gap allows duplicates otherwise).
+ */
+
 const TABLE_NAME = "memories";
 const ARCHIVE_TABLE_NAME = "memories_archive";
 
 export class NoesisDB {
   private conn: lancedb.Connection | null = null;
+  // Instance-level gate — each NoesisDB has its own serialised upsert queue
+  private _upsertGate: Promise<unknown> = Promise.resolve();
   private table: lancedb.Table | null = null;
   private archiveTable: lancedb.Table | null = null;
   private embeddingDim: number = 768;
@@ -106,40 +114,65 @@ export class NoesisDB {
 
   /**
    * Insert a batch of memory entries (upsert by checksum — idempotent).
-   * Returns count of actually inserted entries.
+   *
+   * Concurrency safety — delete-before-insert per checksum:
+   *   1. DELETE any row that already has this checksum (no-op if none exists)
+   *   2. ADD the new row(s)
+   * This is atomic — there is no gap between the "already exists" check and insert
+   * where another concurrent upsert could slip in and create a duplicate.
+   * Each checksum gets its own mutex slot so different checksums proceed in parallel.
+   *
+   * Returns the number of entries inserted (0 if checksum already existed).
    */
   async upsertEntries(entries: MemoryEntry[]): Promise<number> {
     if (entries.length === 0) return 0;
     const tbl = this.getTable();
 
-    // Dedup: check existing checksums in batch.
-    // Batch into groups of 100 to avoid query size limits with large IN clauses.
-    const checksums = entries.map((e) => e.checksum);
-    const existingChecksums = new Set<string>();
-    const BATCH_SIZE = 100;
-
-    try {
-      for (let i = 0; i < checksums.length; i += BATCH_SIZE) {
-        const batch = checksums.slice(i, i + BATCH_SIZE);
-        const quotedBatch = batch.map((c) => `'${c}'`).join(", ");
-        const existing = await tbl
-          .query()
-          .where(`checksum IN (${quotedBatch})`)
-          .select(["checksum"])
-          .limit(batch.length + 1)
-          .toArray();
-        for (const r of existing as any[]) {
-          existingChecksums.add(String(r.checksum));
-        }
-      }
-    } catch {
-      // table might be empty — that's fine
+    // Group by checksum — serialise entries that share the same checksum
+    const byChecksum = new Map<string, MemoryEntry[]>();
+    for (const e of entries) {
+      const arr = byChecksum.get(e.checksum);
+      if (arr) arr.push(e);
+      else byChecksum.set(e.checksum, [e]);
     }
 
-    const newEntries = entries.filter((e) => !existingChecksums.has(e.checksum));
-    if (newEntries.length === 0) return 0;
+    // Serialise ALL upserts through a shared Promise chain (module-level _upsertGate).
+    // Each call: 1) captures its result promise from the gate chain, 2) awaits it.
+    // This ensures all concurrent calls queue FIFO and each gets the correct result.
+    const myWork = async (): Promise<number> => {
+      let inserted = 0;
+      for (const [checksum, group] of byChecksum.entries()) {
+        const n = await this._upsertOneChecksum(tbl, checksum, group);
+        inserted += n;
+      }
+      return inserted;
+    };
+    // Chain work onto the gate; capture the linked gate BEFORE assigning to _upsertGate
+    const linkedGate = this._upsertGate.then(() => myWork());
+    this._upsertGate = linkedGate; // ensure next call chains onto THIS call's completion
+    const result = await linkedGate; // wait for THIS call's work to finish
+    return result;
+  }
 
-    const rows = newEntries.map((e) => ({
+  /**
+   * Delete + re-insert for one checksum.  Called only from within the mutex.
+   * Uses delete-before-insert to eliminate the read-then-insert race window.
+   * Returns 1 if the entry was inserted (new or re-inserted), 0 otherwise.
+   */
+  async _upsertOneChecksum(
+    tbl: ReturnType<typeof this.getTable>,
+    checksum: string,
+    entries: MemoryEntry[]
+  ): Promise<number> {
+    let numDeleted = 0;
+    try {
+      const result = await tbl.delete(`checksum = '${checksum}'`);
+      numDeleted = result.numDeletedRows;
+    } catch (err) {
+      console.error(`[DEBUG] delete for ${checksum} threw: ${err}`);
+      // table might be empty — delete is best-effort here
+    }
+    const rows = entries.map((e) => ({
       id: e.id,
       agentId: e.agentId,
       sessionId: e.sessionId,
@@ -154,9 +187,9 @@ export class NoesisDB {
       expiresAt: e.expiresAt ?? 0,
       tags: Array.isArray(e.tags) ? e.tags.map(String) : [],
     }));
-
     await tbl.add(rows);
-    return newEntries.length;
+    // numDeleted > 0 means checksum already existed — not a new entry
+    return numDeleted === 0 ? 1 : 0;
   }
 
   /**

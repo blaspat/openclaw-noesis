@@ -398,7 +398,11 @@ export class NoesisDB {
    */
   async deleteById(id: string): Promise<void> {
     const tbl = this.getTable();
-    await tbl.delete(`id = '${id.replace(/'/g, "''")}'`);
+    try {
+      await tbl.delete(`id = '${id.replace(/'/g, "''")}'`);
+    } catch (err) {
+      logError("deleteById failed", { error: err, extra: { id } });
+    }
   }
 
   /**
@@ -469,10 +473,15 @@ export class NoesisDB {
    */
   async count(agentId?: string): Promise<number> {
     const tbl = this.getTable();
-    if (agentId) {
-      return tbl.countRows(`agentId = '${escapeFilterValue(agentId)}'`);
+    try {
+      if (agentId) {
+        return tbl.countRows(`agentId = '${escapeFilterValue(agentId)}'`);
+      }
+      return tbl.countRows();
+    } catch (err) {
+      logError("count failed", { error: err, extra: { agentId } });
+      return 0;
     }
-    return tbl.countRows();
   }
 
   /**
@@ -507,41 +516,56 @@ export class NoesisDB {
     try {
       // Process expired entries in batches to avoid large queries.
       while (true) {
-        const toArchive = await tbl
-          .query()
-          .where(`expiresAt > 0 AND expiresAt < ${now}`)
-          .select(["id", "agentId", "sessionId", "content", "chunk", "embedding", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"])
-          .limit(500)
-          .toArray();
+        let toArchive: any[] = [];
+        try {
+          toArchive = await tbl
+            .query()
+            .where(`expiresAt > 0 AND expiresAt < ${now}`)
+            .select(["id", "agentId", "sessionId", "content", "chunk", "embedding", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"])
+            .limit(500)
+            .toArray();
+        } catch (err) {
+          logError("archiveExpired query failed", { error: err });
+          break;
+        }
         if (toArchive.length === 0) break;
 
-      // Delete FIRST — if the process crashes between delete and insert, entries
-      // are missing from active (not duplicated in archive). Next run will re-archive
-      // them. This is safer than insert-then-delete where a crash causes duplication.
-      const ids = toArchive.map((r: any) => `'${r.id}'`).join(", ");
-      await tbl.delete(`id IN (${ids})`);
+        // Delete FIRST — if the process crashes between delete and insert, entries
+        // are missing from active (not duplicated in archive). Next run will re-archive
+        // them. This is safer than insert-then-delete where a crash causes duplication.
+        try {
+          const ids = toArchive.map((r: any) => `'${r.id}'`).join(", ");
+          await tbl.delete(`id IN (${ids})`);
+        } catch (err) {
+          logError("archiveExpired delete failed", { error: err });
+          break;
+        }
 
-      // Insert into archive — if this fails, entries are still gone from active
-      // but will be re-archived on the next cleanup cycle. Acceptable trade-off.
-      const archiveTbl = this.getArchiveTable();
-      const rows = toArchive.map((r: any) => ({
-        id: String(r.id),
-        agentId: String(r.agentId),
-        sessionId: String(r.sessionId),
-        content: String(r.content),
-        chunk: String(r.chunk ?? ""),
-        embedding: r.embedding,
-        memoryType: String(r.memoryType ?? "fact"),
-        priority: Number(r.priority ?? 0),
-        expiresAt: Number(r.expiresAt ?? 0),
-        createdAt: Number(r.createdAt ?? 0),
-        sourcePath: String(r.sourcePath ?? ""),
-        checksum: String(r.checksum ?? ""),
-        tags: Array.isArray(r.tags) ? r.tags.map(String) : [],
-      }));
-      await archiveTbl.add(rows);
-      archived += toArchive.length;
-
+        // Insert into archive — if this fails, entries are still gone from active
+        // but will be re-archived on the next cleanup cycle. Acceptable trade-off.
+        try {
+          const archiveTbl = this.getArchiveTable();
+          const rows = toArchive.map((r: any) => ({
+            id: String(r.id),
+            agentId: String(r.agentId),
+            sessionId: String(r.sessionId),
+            content: String(r.content),
+            chunk: String(r.chunk ?? ""),
+            embedding: r.embedding,
+            memoryType: String(r.memoryType ?? "fact"),
+            priority: Number(r.priority ?? 0),
+            expiresAt: Number(r.expiresAt ?? 0),
+            createdAt: Number(r.createdAt ?? 0),
+            sourcePath: String(r.sourcePath ?? ""),
+            checksum: String(r.checksum ?? ""),
+            tags: Array.isArray(r.tags) ? r.tags.map(String) : [],
+          }));
+          await archiveTbl.add(rows);
+          archived += toArchive.length;
+        } catch (err) {
+          logError("archiveExpired archive insert failed", { error: err });
+          break;
+        }
       }
     } catch (err) {
       // archive table not ready — skip silently
@@ -845,14 +869,19 @@ export class NoesisDB {
     const tbl = this.getTable();
     const now = Date.now();
 
-    let query = tbl
-      .query()
-      .select(["id", "agentId", "sessionId", "content", "chunk", "embedding", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"])
-      .where(`priority >= ${minPriority}`)
-      .limit(limit);
-
-    const results = await query.toArray();
-    const entries = (results as any[]).map(rowToEntry);
+    let results: any[] = [];
+    try {
+      results = await tbl
+        .query()
+        .select(["id", "agentId", "sessionId", "content", "chunk", "embedding", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"])
+        .where(`priority >= ${minPriority}`)
+        .limit(limit)
+        .toArray();
+    } catch (err) {
+      logError("queryByPriority query failed", { error: err, extra: { minPriority, agentId } });
+      return [];
+    }
+    const entries = results.map(rowToEntry);
 
     // Filter out expired
     const active = entries.filter(e => e.expiresAt === 0 || e.expiresAt > now);

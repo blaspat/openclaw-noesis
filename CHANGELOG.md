@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.5.2](https://github.com/blaspat/openclaw-noesis/compare/v1.5.1...v1.5.2) (2026-04-22)
+
+
+### Bug Fixes
+
+* **lancedb**: BigInt comparison fix — `numDeletedRows` wrapped with `Number()` (was always failing strict `=== 0` check)
+* **lancedb**: SQL injection prevention — `checksum` now escaped with `escapeFilterValue()` in DELETE query
+* **lancedb**: Race condition fix — `ensureAnnIndex` now uses promise guard so concurrent callers await the same index creation
+* **lancedb**: Error handling — `connect()` now nulls connection state on failure before re-throwing
+* **lancedb**: `archiveExpired` now logs errors instead of silently swallowing them
+* **search**: MMR formula scale fix — `normalizedRelevance` brings unbounded hybrid scores to [0,1] before lambda blend
+* **search**: Cross-encoder blend fix — `normalizedOriginal` brings hybrid scores to [0,1] before 60/40 blend
+* **search**: IDF weighting — `buildTermVectorWithIDF` uses corpus document frequency for better diversity selection
+* **search**: BM25 candidate parity — now fetches `topK * 3` to match vector search expansion factor
+* **search**: Cross-encoder timeout — 30s timeout on embedBatch via `Promise.race`
+
+
 ## [1.5.1](https://github.com/blaspat/openclaw-noesis/compare/v1.5.0...v1.5.1) (2026-04-20)
 
 

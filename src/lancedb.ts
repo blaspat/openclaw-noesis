@@ -46,9 +46,16 @@ export class NoesisDB {
     // Ensure db directory exists
     fs.mkdirSync(this.dbPath, { recursive: true });
 
-    this.conn = await lancedb.connect(this.dbPath);
-    this.table = await this.openOrCreateTable();
-    this.archiveTable = await this.openOrCreateArchiveTable();
+    try {
+      this.conn = await lancedb.connect(this.dbPath);
+      this.table = await this.openOrCreateTable();
+      this.archiveTable = await this.openOrCreateArchiveTable();
+    } catch (err) {
+      this.table = null;
+      this.archiveTable = null;
+      this.conn = null;
+      throw err;
+    }
   }
 
   /**
@@ -185,9 +192,9 @@ export class NoesisDB {
   ): Promise<number> {
     let numDeleted = 0;
     try {
-      const delP = tbl.delete(`checksum = '${checksum}'`);
+      const delP = tbl.delete(`checksum = '${escapeFilterValue(checksum)}'`);
       const result = await this.withTimeout(delP, 30_000, "delete checksum=" + checksum);
-      numDeleted = result.numDeletedRows;
+      numDeleted = Number(result.numDeletedRows);
     } catch (err) {
       logError("Upsert delete failed", { error: err, extra: { checksum } });
       throw err;
@@ -568,7 +575,7 @@ export class NoesisDB {
         }
       }
     } catch (err) {
-      // archive table not ready — skip silently
+      logError("archiveExpired failed", { error: err });
     }
     return archived;
   }
@@ -768,6 +775,13 @@ export class NoesisDB {
    */
   async ensureAnnIndex(): Promise<void> {
     if (this.indexCreated) return;
+    // local promise guard so concurrent callers all await the same creation
+    if ((this as any)._annIndexPromise) return;
+    (this as any)._annIndexPromise = this._ensureAnnIndexLocked();
+    await (this as any)._annIndexPromise;
+  }
+
+  private async _ensureAnnIndexLocked(): Promise<void> {
     const tbl = this.getTable();
     const count = await tbl.countRows();
     if (count < 256) return; // IVF-PQ needs enough data to build partitions
@@ -784,10 +798,11 @@ export class NoesisDB {
           }),
         });
       }
-      this.indexCreated = true;
     } catch (err) {
       // Index creation is best-effort — ANN just won't be used, but log so operator knows
       logError("Failed to create ANN index", { error: err, extra: { table: "memories" } });
+    } finally {
+      this.indexCreated = true;
     }
   }
 

@@ -20,14 +20,33 @@ import { hybridSearch, cosineSimilarityDense } from "./search.js";
 import { importMarkdownFiles, importAllAgents } from "./migrator.js";
 import { SessionWatcher, startSessionScanner, SessionScanner } from "./watcher.js";
 import {
+  logInfo,
   logError,
   logFatal,
   installGlobalErrorHandlers,
-  configureErrorLog,
+  configureLogs,
   withErrorLog,
 } from "./logger.js";
 
 // ─── plugin state (module-level singletons) ────────────────────────────────
+
+// ─── noise patterns — messages matching these are dropped before indexing ────────
+
+const NOISE_PATTERNS = [
+  "HEARTBEAT_OK",
+  "A scheduled reminder has been triggered",
+  "Execute your Session Startup sequence now",
+  "Queued messages from",
+  "Assistant output is not needed",
+  "NO_REPLY",
+];
+
+export function isNoiseMessage(text: string): boolean {
+  const trimmed = text.trim();
+  return NOISE_PATTERNS.some(
+    (p) => trimmed === p || trimmed.startsWith(p)
+  );
+}
 
 // ─── last-cleanup timestamp helpers ────────────────────────────────────────────
 
@@ -63,25 +82,24 @@ function setLastCleanupTimestamp(ts: number): void {
 /**
  * Log a warning if the gap since last cleanup is unexpectedly large (> 24h).
  */
-function warnOnLargeCleanupGap(log: (msg: string) => void): void {
+function warnOnLargeCleanupGap(): void {
   const last = getLastCleanupTimestamp();
-  if (last === 0) return; // never cleaned — first run, normal
+  if (last === 0) return;
   const gapHours = (Date.now() - last) / (1000 * 60 * 60);
   if (gapHours > 24) {
-    log(`[noesis] Warning: ${gapHours.toFixed(1)}h since last TTL cleanup. ` +
-      "Expired entries may have accumulated. Consider restarting the gateway to trigger auto-cleanup.");
+    logInfo(`[noesis] Warning: ${gapHours.toFixed(1)}h since last TTL cleanup. Expired entries may have accumulated.`);
   }
 }
 
 let db: NoesisDB | null = null;
 let ollama: EmbeddingClient | null = null;
-let watcher: SessionWatcher | null = null;
-let memoryWatcher: SessionWatcher | null = null;
 let sessionScanner: SessionScanner | null = null;
 let resolvedConfig: NoesisConfig = { ...DEFAULT_CONFIG };
 let initialized = false;
 let cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
 let optimizeIntervalId: ReturnType<typeof setInterval> | null = null;
+let _isArchiving = false;
+let _isOptimizing = false;
 
 // ─── plugin entry ──────────────────────────────────────────────────────────
 
@@ -95,11 +113,11 @@ export default definePluginEntry({
     // Merge user config with defaults
     resolvedConfig = buildConfig(api.pluginConfig ?? {});
 
-    api.logger.info(`[noesis] Starting with config: model=${resolvedConfig.embeddingModel}, db=${resolvedConfig.lanceDbPath}`);
+    logInfo(`[noesis] Starting with config: model=${resolvedConfig.embeddingModel}, db=${resolvedConfig.lanceDbPath}`);
 
     // Initialize async — plugin tools remain available, they'll block until ready
-    initPlugin(resolvedConfig, api.logger.info.bind(api.logger)).catch((err) => {
-      api.logger.error(`[noesis] Initialization failed: ${err}`);
+    initPlugin(resolvedConfig).catch((err) => {
+      logError(`[noesis] Initialization failed: ${err}`);
     });
 
     // ── Tool: noesis_index ────────────────────────────────────────────────
@@ -436,7 +454,7 @@ export default definePluginEntry({
 
             const logLines: string[] = [];
             const log = (msg: string) => {
-              api.logger.info(msg);
+              logInfo(msg);
               logLines.push(msg);
             };
 
@@ -1122,10 +1140,25 @@ export default definePluginEntry({
         };
       });
 
-      api.logger.info(`[noesis] Context engine registered (assembleInjectPriority=${resolvedConfig.assembleInjectPriority}, assembleMaxEntries=${resolvedConfig.assembleMaxEntries})`);
+      logInfo(`[noesis] Context engine registered (assembleInjectPriority=${resolvedConfig.assembleInjectPriority}, assembleMaxEntries=${resolvedConfig.assembleMaxEntries})`);
     }
 
-    api.logger.info(`[noesis] Plugin registered — ${Object.keys(api.pluginConfig ?? {}).length} config key(s)`);
+    logInfo(`[noesis] Plugin registered — ${Object.keys(api.pluginConfig ?? {}).length} config key(s)`);
+
+    // Graceful shutdown: clear intervals, close scanner, and disconnect LanceDB on gateway stop.
+    // Also reset module-level state so repeated reloads don't leak intervals or hold stale refs.
+    api.on("gateway_stop", async () => {
+      logInfo("[noesis] Shutting down...");
+      if (cleanupIntervalId !== null) { clearInterval(cleanupIntervalId); cleanupIntervalId = null; }
+      if (optimizeIntervalId !== null) { clearInterval(optimizeIntervalId); optimizeIntervalId = null; }
+      if (sessionScanner) { sessionScanner.close(); sessionScanner = null; }
+      if (db) {
+        await db.disconnect().catch((err: any) => logError(`[noesis] disconnect() error: ${err}`));
+        db = null;
+      }
+      initialized = false;
+      logInfo("[noesis] Shutdown complete.");
+    });
   },
 });
 
@@ -1134,25 +1167,15 @@ export default definePluginEntry({
 // Guard: wrap a log function to suppress EPIPE if the log stream is closed.
 // This prevents crashes when stdout/stderr is broken (e.g. pipe to head/jq/grep
 // that closes early) or when the gateway process terminates during log output.
-function makeSafeLog(log: (msg: string) => void): (msg: string) => void {
-  return (msg: string) => {
-    try {
-      log(msg);
-    } catch (err: any) {
-      if (err?.code === "EPIPE" || err?.code === "EIO") return;
-      throw err;
-    }
-  };
-}
 
 
-async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Promise<void> {
-  const safeLog = makeSafeLog(log);
-
-  // Set up dedicated error logging first — before anything else
-  configureErrorLog(config.errorLogPath);
+async function initPlugin(config: NoesisConfig): Promise<void> {
+  // Set up dedicated logging first — before anything else
+  configureLogs(config.noesisLogPath, config.errorLogPath);
   installGlobalErrorHandlers();
-  safeLog(`[noesis] Error log: ${config.errorLogPath}`);
+  logInfo(`[noesis] Starting — model=${config.embeddingModel}, db=${config.lanceDbPath}`);
+  logInfo(`[noesis] Info log: ${config.noesisLogPath}`);
+  logInfo(`[noesis] Error log: ${config.errorLogPath}`);
 
   // 1. Connect to LanceDB
   try {
@@ -1164,7 +1187,7 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
 
   // 2. Auto-configure Transformers.js embedding model
   try {
-    ollama = await autoConfigTransformers(config.embeddingModel, log);
+    ollama = await autoConfigTransformers(config.embeddingModel, logInfo);
   } catch (err) {
     logError("Failed to auto-configure Transformers.js embedding model", { error: err });
     throw err;
@@ -1182,7 +1205,7 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
 
   try {
     await db.connect(embeddingDim);
-    safeLog(`[noesis] LanceDB connected (${embeddingDim}d embeddings, path: ${config.lanceDbPath})`);
+    logInfo(`[noesis] LanceDB connected (${embeddingDim}d embeddings, path: ${config.lanceDbPath})`);
   } catch (err) {
     logError("Failed to connect to LanceDB", { error: err });
     throw err;
@@ -1195,10 +1218,10 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
     try {
       const count = await db.count();
       if (count === 0) {
-        safeLog("[noesis] autoMigrate enabled and DB is empty — importing markdown memory files...");
-        await importAllAgents(db, ollama, config, safeLog);
+        logInfo("[noesis] autoMigrate enabled and DB is empty — importing markdown memory files...");
+        await importAllAgents(db, ollama, config, logInfo);
       } else {
-        safeLog(`[noesis] autoMigrate enabled but DB already has ${count} entries — skipping auto-migrate (run noesis_import to re-migrate manually)`);
+        logInfo(`[noesis] autoMigrate enabled but DB already has ${count} entries — skipping auto-migrate (run noesis_import to re-migrate manually)`);
       }
     } catch (err) {
       logError("Auto-migrate failed", { error: err, extra: { autoMigrate: true } });
@@ -1208,7 +1231,7 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
   // 4. Optional: interval-based session scanner (replaces chokidar watcher)
   if (config.indexQmdSessions) {
     try {
-      sessionScanner = startSessionScanner(db, ollama, config, safeLog);
+      sessionScanner = startSessionScanner(db, ollama, config, logInfo);
     } catch (err) {
       logError("Failed to start session scanner", { error: err, extra: { indexQmdSessions: true } });
     }
@@ -1217,15 +1240,15 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
  
   // 5. Optional: auto-cleanup expired entries on startup
   if (config.autoCleanup) {
-    warnOnLargeCleanupGap(log);
+    warnOnLargeCleanupGap();
     try {
       const archived = await db.archiveExpired();
       if (archived > 0) {
-        safeLog(`[noesis] Archived ${archived} expired entries.`);
+        logInfo(`[noesis] Archived ${archived} expired entries.`);
         setLastCleanupTimestamp(Date.now());
       }
     } catch (err) {
-      safeLog(`[noesis] Cleanup skipped: ${err}`);
+      logInfo(`[noesis] Cleanup skipped: ${err}`);
       logError("Startup cleanup failed", { error: err, extra: { autoCleanup: true } });
     }
   }
@@ -1235,45 +1258,59 @@ async function initPlugin(config: NoesisConfig, log: (msg: string) => void): Pro
   // from repeated writes. Safe to run on every startup — LanceDB handles it.
   try {
     await db.optimize();
-    safeLog(`[noesis] Startup LanceDB optimize() complete.`);
+    logInfo(`[noesis] Startup LanceDB optimize() complete.`);
   } catch (err) {
-    safeLog(`[noesis] Startup optimize() skipped: ${err}`);
+    logInfo(`[noesis] Startup optimize() skipped: ${err}`);
   }
 
   // 6. Optional: periodic TTL cleanup on configurable interval
   if (config.cleanupIntervalHours > 0) {
     const intervalMs = config.cleanupIntervalHours * 60 * 60 * 1000;
     cleanupIntervalId = setInterval(() => {
+      if (_isArchiving) {
+        logInfo(`[noesis] Skipping cleanup tick: previous archive still in progress`);
+        return;
+      }
+      _isArchiving = true;
       db!.archiveExpired()
         .then((n) => {
           if (n > 0) {
-            safeLog(`[noesis] Periodic cleanup archived ${n} entries.`);
+            logInfo(`[noesis] Periodic cleanup archived ${n} entries.`);
             setLastCleanupTimestamp(Date.now());
           }
         })
         .catch((err) => {
-          safeLog(`[noesis] Periodic cleanup error: ${err}`);
+          logInfo(`[noesis] Periodic cleanup error: ${err}`);
           logError("Periodic cleanup failed", { error: err, extra: { cleanupIntervalHours: config.cleanupIntervalHours } });
-        });
+        })
+        .finally(() => { _isArchiving = false; });
     }, intervalMs);
-    safeLog(`[noesis] Periodic cleanup scheduled every ${config.cleanupIntervalHours}h`);
+    logInfo(`[noesis] Periodic cleanup scheduled every ${config.cleanupIntervalHours}h`);
   }
 
   // 7. Hardcoded 5-minute interval for LanceDB optimize() to prevent version store bloat.
   // Not configurable — this should run frequently to keep _versions/ lean.
+  // Uses 1h older-than threshold (vs default 24h) to reclaim versions more aggressively
+  // and prevent _versions/ accumulation from rapid writes.
   optimizeIntervalId = setInterval(() => {
-    db!.optimize()
+    if (_isOptimizing) {
+      logInfo(`[noesis] Skipping optimize tick: previous optimize still in progress`);
+      return;
+    }
+    _isOptimizing = true;
+    db!.optimize(60 * 60 * 1000) // 1h instead of 24h default
       .then(() => {
-        safeLog(`[noesis] Periodic LanceDB optimize() complete.`);
+        logInfo(`[noesis] Periodic LanceDB optimize() complete.`);
       })
       .catch((err) => {
-        safeLog(`[noesis] Periodic optimize() error: ${err}`);
+        logInfo(`[noesis] Periodic optimize() error: ${err}`);
         logError("Periodic optimize failed", { error: err });
-      });
+      })
+      .finally(() => { _isOptimizing = false; });
   }, 5 * 60 * 1000);
-  safeLog(`[noesis] Periodic LanceDB optimize() scheduled every 5min`);
+  logInfo(`[noesis] Periodic LanceDB optimize() scheduled every 5min`);
 
-  safeLog("[noesis] Initialization complete.");
+  ;
 }
 
 async function ensureInitialized(): Promise<void> {
@@ -1315,6 +1352,7 @@ function buildConfig(raw: Record<string, unknown>): NoesisConfig {
     assembleMaxEntries: Number(raw.assembleMaxEntries ?? DEFAULT_CONFIG.assembleMaxEntries),
     assembleMaxAgeDays: Number(raw.assembleMaxAgeDays ?? DEFAULT_CONFIG.assembleMaxAgeDays),
     errorLogPath: String(raw.errorLogPath ?? DEFAULT_CONFIG.errorLogPath),
+    noesisLogPath: String(raw.noesisLogPath ?? DEFAULT_CONFIG.noesisLogPath),
     vectorWeight: Number(raw.vectorWeight ?? DEFAULT_CONFIG.vectorWeight),
     rerank: Boolean(raw.rerank ?? DEFAULT_CONFIG.rerank),
     rerankerEndpoint: raw.rerankerEndpoint ? String(raw.rerankerEndpoint) : undefined,

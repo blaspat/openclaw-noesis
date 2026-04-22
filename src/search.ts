@@ -45,23 +45,19 @@ export async function hybridSearch(
   // 1. Embed the query
   const queryEmbedding = await ollama.embed(query);
 
-  // 2. Vector search (expanded candidate set)
+  // 2. Vector search (expanded candidate set — 3x to catch high-priority entries without a second query)
   const vectorResults = await db.vectorSearch(
     queryEmbedding,
-    topK * 2,
+    topK * 3,
     options.agentId,
     options.memoryType,
     options.crossAgent
   );
 
-  // 3. BM25 full-text search
-  const bm25Results = await db.fullTextSearch(
-    query,
-    topK,
-    options.agentId,
-    options.memoryType,
-    options.crossAgent
-  );
+  // 3. BM25 full-text search (skip when pure vector mode)
+  const bm25Results = vectorWeight < 1.0
+    ? await db.fullTextSearch(query, topK * 3, options.agentId, options.memoryType, options.crossAgent)
+    : [];
 
   // 4. Hybrid merge (active table only — expired entries live in archive, not here)
   const scoreMap = new Map<string, { result: typeof vectorResults[0]; score: number }>();
@@ -86,16 +82,9 @@ export async function hybridSearch(
     .sort((a, b) => b.score - a.score)
     .slice(0, topK * 2);
 
-  // 5. Always include high-priority entries (priority >= 75) regardless of score
-  const priorityBoost = new Set(merged.map((m) => m.result.id));
-  const highPriorityResults = await db.vectorSearch(queryEmbedding, topK, options.agentId, options.memoryType, options.crossAgent);
-  for (const r of highPriorityResults) {
-    if (r.priority >= 75 && !priorityBoost.has(r.id)) {
-      merged.push({ result: r, score: 0 }); // score 0 but will be sorted to top by priority boost
-    }
-  }
-
-  // Sort again with priority boost
+  // 5. Priority boost: ensure high-priority entries (>= 75) are included from the expanded set.
+  //    Already fetched topK*3 above so high-priority entries should be present;
+  //    sort them to the top without a second DB query.
   const withPriority = merged.sort((a, b) => {
     const ap = (a.result as any).priority ?? 0;
     const bp = (b.result as any).priority ?? 0;
@@ -112,7 +101,7 @@ export async function hybridSearch(
   //    thematically similar but factually different content). Uses cosine similarity
   //    between fresh query embedding and each candidate's stored embedding.
   const finalResults = options.rerank
-    ? await crossEncoderRerank(query, mmrResults, ollama, topK, scoreMap)
+    ? await crossEncoderRerank(queryEmbedding, mmrResults, ollama, topK, scoreMap)
     : mmrResults;
 
   return finalResults.map((r) => ({
@@ -149,10 +138,14 @@ function mmrRerank(
   if (candidates.length === 0) return [];
   if (candidates.length <= topK) return candidates;
 
-  // Use content-based pseudo-embeddings (BM25 term vectors) for MMR diversity
+  // Use content-based pseudo-embeddings (BM25 term vectors + IDF weighting) for MMR diversity
   // Since we don't have stored embeddings in search results, we use content TF-IDF approximation
   const contentVectors = candidates.map((c) => buildTermVector(c.content));
   const queryTermVector = buildTermVector(candidates.map((c) => c.content).join(" "));
+
+
+  // Normalize relevance scores to [0,1] for MMR formula compatibility
+  const maxRelevanceScore = Math.max(...candidates.map((c) => c.score), 1);
 
   const selected: number[] = [];
   const remaining = new Set(candidates.map((_, i) => i));
@@ -163,6 +156,8 @@ function mmrRerank(
 
     for (const idx of remaining) {
       const relevanceScore = candidates[idx].score;
+      const normalizedRelevance = maxRelevanceScore > 0 ? relevanceScore / maxRelevanceScore : 0;
+
 
       // Max similarity to already-selected candidates (penalize redundancy)
       let maxSimToSelected = 0;
@@ -171,7 +166,7 @@ function mmrRerank(
         if (sim > maxSimToSelected) maxSimToSelected = sim;
       }
 
-      const mmrScore = lambda * relevanceScore - (1 - lambda) * maxSimToSelected;
+      const mmrScore = lambda * normalizedRelevance - (1 - lambda) * maxSimToSelected;
       if (mmrScore > bestScore) {
         bestScore = mmrScore;
         bestIdx = idx;
@@ -188,19 +183,50 @@ function mmrRerank(
 
 /**
  * Build a sparse TF-IDF-like term vector for MMR diversity calculation.
+ * Uses IDF weighting so discriminative terms outweigh common ones.
  */
 function buildTermVector(text: string): Map<string, number> {
-  const words = text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
-  const counts = new Map<string, number>();
-  for (const word of words) {
-    if (word.length > 2) { // skip tiny words
-      counts.set(word, (counts.get(word) ?? 0) + 1);
+  return buildTermVectorWithIDF([text])[0];
+}
+
+/**
+ * Build term vectors with IDF weighting across a corpus.
+ * Returns vectors for each document, with term frequencies weighted by log(N / df).
+ */
+function buildTermVectorWithIDF(texts: string[]): Array<Map<string, number>> {
+  const N = texts.length;
+  const counts: Array<Map<string, number>> = texts.map((text) => {
+    const words = text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+    const docCounts = new Map<string, number>();
+    for (const word of words) {
+      if (word.length >= 2) { // keep 2-char words like "AI", "ML", "API"
+        docCounts.set(word, (docCounts.get(word) ?? 0) + 1);
+      }
+    }
+    return docCounts;
+  });
+
+
+  // Compute document frequency (df) for each term
+  const df = new Map<string, number>();
+  for (const docCounts of counts) {
+    for (const word of docCounts.keys()) {
+      df.set(word, (df.get(word) ?? 0) + 1);
     }
   }
-  // Normalize
-  const total = words.length || 1;
-  for (const [k, v] of counts) counts.set(k, v / total);
-  return counts;
+
+  // Build TF-IDF vectors
+  return counts.map((docCounts) => {
+    const total = Array.from(docCounts.values()).reduce((s, v) => s + v, 0) || 1;
+    const vector = new Map<string, number>();
+    for (const [word, count] of docCounts) {
+      const tf = count / total;
+      const docFreq = df.get(word) ?? 1;
+      const idf = Math.log((N + 1) / (docFreq + 1)) + 1; // smoothed IDF
+      vector.set(word, tf * idf);
+    }
+    return vector;
+  });
 }
 
 /**
@@ -257,7 +283,7 @@ export function cosineSimilarityDense(a: number[], b: number[]): number {
  * this is an approximation. Set rerank=false to disable.
  */
 async function crossEncoderRerank(
-  query: string,
+  queryEmbedding: number[],
   candidates: Array<{ id: string; agentId: string; sessionId: string; content: string; memoryType: string; createdAt: number; sourcePath: string; tags: string[]; score: number; priority?: number; expiresAt?: number }>,
   ollama: EmbeddingClient,
   topK: number,
@@ -265,16 +291,25 @@ async function crossEncoderRerank(
 ): Promise<typeof candidates> {
   if (candidates.length === 0) return [];
 
-  // Re-embed the query with Ollama (fresh embedding = current query intent)
-  const queryEmbedding = await ollama.embed(query);
-
   // Score each candidate by cosine similarity between query embedding and stored embedding.
   // We need the stored embedding per candidate — candidates don't carry embeddings
   // from vectorSearch (only scores), so we use the content as proxy.
   // For proper cross-encoder quality, candidates would need their stored embeddings
   // returned from vectorSearch. Since LanceDB doesn't return embeddings in search
   // results by default, we approximate by re-embedding the content.
-  const contentEmbeddings = await ollama.embedBatch(candidates.map((c) => c.content));
+  const withTimeout = <T>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) =>
+        setTimeout(() => reject(new Error(`[${label}] timeout after ${ms}ms`)), ms)
+      ),
+    ]);
+  };
+  const contentEmbeddings = await withTimeout(
+    ollama.embedBatch(candidates.map((c) => c.content)),
+    30000,
+    "crossEncoderRerank"
+  );
 
   const rerankScores = candidates.map((c, i) => ({
     candidate: c,
@@ -290,12 +325,19 @@ async function crossEncoderRerank(
   const RERANK_WEIGHT = 0.6;
   const ORIGINAL_WEIGHT = 0.4;
 
+  // Normalize original scores to [0,1] for coherent blending with normalizedRerank
+  const allOriginalScores = rerankScores.map(({ candidate }) => scoreMap.get(candidate.id)?.score ?? candidate.score ?? 0);
+  const maxOriginal = Math.max(...allOriginalScores, 1);
+  const minOriginal = Math.min(...allOriginalScores, 0);
+  const rangeOriginal = maxOriginal - minOriginal || 1;
+
   const blended = rerankScores.map(({ candidate, rerankScore }) => {
     const normalizedRerank = (rerankScore - minRerank) / rangeRerank;
     const originalScore = scoreMap.get(candidate.id)?.score ?? candidate.score ?? 0;
+    const normalizedOriginal = (originalScore - minOriginal) / rangeOriginal;
     const blendedScore =
       RERANK_WEIGHT * normalizedRerank +
-      ORIGINAL_WEIGHT * originalScore;
+      ORIGINAL_WEIGHT * normalizedOriginal;
     return { candidate, blendedScore };
   });
 

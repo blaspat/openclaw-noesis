@@ -5,6 +5,7 @@ import { randomUUID } from "crypto";
 import { EmbeddingClient, chunkText, contentChecksum } from "./transformers.js";
 import { NoesisDB } from "./lancedb.js";
 import { MemoryEntry, MemoryType, NoesisConfig } from "./types.js";
+import { isNoiseMessage } from "./index.js";
 
 const DEBOUNCE_MS = 2000;
 
@@ -234,8 +235,12 @@ export async function indexSessionFile(
         text = entry.text;
       }
 
-      if (text.trim().replace(/[\n\t\r]+/g, ' ').length > 20) {
-        texts.push(text.trim().replace(/[\n\t\r]+/g, ' '));
+      // Filter out noise messages before indexing.
+      if (isNoiseMessage(text)) return;
+
+      const cleaned = text.trim().replace(/[\n\t\r]+/g, ' ');
+      if (cleaned.length > 20) {
+        texts.push(cleaned);
       }
     } catch {
       // skip malformed lines
@@ -316,72 +321,102 @@ export function startSessionScanner(
   // Track in-flight index operations to avoid concurrent processing of the same file
   const inflight = new Set<string>();
 
-  const scanDirs = async () => {
-    if (!fs.existsSync(agentsPath)) return;
+  // Concurrency limit for agent scans to avoid overwhelming the embedder
+  const AGENT_CONCURRENCY = 3;
 
-    let agentDirs: string[] = [];
-    try {
-      agentDirs = fs.readdirSync(agentsPath).filter(
-        (d) => !d.startsWith(".")
+  /** Scan a single agent's session and memory files. */
+  async function scanAgent(
+    agentDir: string,
+    agentsPath: string,
+    inflight: Set<string>,
+    db: NoesisDB,
+    ollama: EmbeddingClient,
+    config: NoesisConfig,
+    logger?: (msg: string) => void
+  ): Promise<void> {
+    // Scan session files: agents/<agent>/sessions/*.jsonl
+    const sessionsDir = path.join(agentsPath, agentDir, "sessions");
+    if (fs.existsSync(sessionsDir)) {
+      let files: string[] = [];
+      try {
+        files = fs.readdirSync(sessionsDir).filter(
+          (f) => f.endsWith(".jsonl") && !f.includes(".lock") && !f.includes(".checkpoint") && !f.includes(".reset")
+        );
+      } catch {
+        // continue
+      }
+      if (files.length > 0) {
+        logger?.(`[noesis/scanner] ${agentDir}: scanning ${files.length} session file(s)`);
+      }
+      // Index session files concurrently (bounded by AGENT_CONCURRENCY via Promise.allSettled at the batch level)
+      const sessionResults = await Promise.allSettled(
+        files.map((file) => {
+          const filePath = path.join(sessionsDir, file);
+          if (inflight.has(filePath)) return Promise.resolve();
+          inflight.add(filePath);
+          return indexSessionFile(filePath, db, ollama, config, logger).finally(() => inflight.delete(filePath));
+        })
       );
-    } catch {
-      return;
+      for (const r of sessionResults) {
+        if (r.status === "rejected") {
+          logger?.(`[noesis/scanner] Session index error: ${r.reason}`);
+        }
+      }
     }
 
-    for (const agentDir of agentDirs) {
-      // Scan session files: agents/<agent>/sessions/*.jsonl
-      const sessionsDir = path.join(agentsPath, agentDir, "sessions");
-      if (fs.existsSync(sessionsDir)) {
-        let files: string[] = [];
-        try {
-          files = fs.readdirSync(sessionsDir).filter(
-            (f) => f.endsWith(".jsonl") && !f.includes(".lock") && !f.includes(".checkpoint") && !f.includes(".reset")
-          );
-        } catch {
-          // continue
-        }
-        logger?.(`[noesis/scanner] ${agentDir}: scanning ${files.length} session file(s)`);
-        for (const file of files) {
-          const filePath = path.join(sessionsDir, file);
-          if (inflight.has(filePath)) continue;
-          inflight.add(filePath);
-          try {
-            await indexSessionFile(filePath, db, ollama, config, logger);
-          } catch (err) {
-            logger?.(`[noesis/scanner] Error indexing ${filePath}: ${err}`);
-          } finally {
-            inflight.delete(filePath);
-          }
-        }
+    // Scan memory files: agents/<agent>/workspace/memory/*.md
+    const memoryDir = path.join(agentsPath, agentDir, "workspace", "memory");
+    if (fs.existsSync(memoryDir)) {
+      let files: string[] = [];
+      try {
+        files = fs.readdirSync(memoryDir).filter(
+          (f) => f.endsWith(".md") && !f.startsWith(".")
+        );
+      } catch {
+        // continue
       }
-
-      // Scan memory files: agents/<agent>/workspace/memory/*.md
-      const memoryDir = path.join(agentsPath, agentDir, "workspace", "memory");
-      if (fs.existsSync(memoryDir)) {
-        let files: string[] = [];
-        try {
-          files = fs.readdirSync(memoryDir).filter(
-            (f) => f.endsWith(".md") && !f.startsWith(".")
-          );
-        } catch {
-          // continue
-        }
-        for (const file of files) {
+      const memResults = await Promise.allSettled(
+        files.map((file) => {
           const filePath = path.join(memoryDir, file);
-          if (inflight.has(filePath)) continue;
+          if (inflight.has(filePath)) return Promise.resolve();
           inflight.add(filePath);
-          try {
-            const indexed = await indexMemoryFile(filePath, db, ollama, config, logger);
-            if (indexed > 0) {
-              logger?.(`[noesis/scanner] Indexed ${indexed} chunk(s) from ${file}`);
-            }
-          } catch (err) {
-            logger?.(`[noesis/scanner] Error indexing ${filePath}: ${err}`);
-          } finally {
-            inflight.delete(filePath);
-          }
+          return indexMemoryFile(filePath, db, ollama, config, logger).finally(() => inflight.delete(filePath));
+        })
+      );
+      for (const r of memResults) {
+        if (r.status === "rejected") {
+          logger?.(`[noesis/scanner] Memory index error: ${r.reason}`);
         }
       }
+    }
+  }
+
+  let _isScanning = false;
+
+  const scanDirs = async () => {
+    // Skip this tick if a previous scan is still running — prevents overlap
+    if (_isScanning) {
+      logger?.(`[noesis/scanner] Skipping tick: previous scan still in progress`);
+      return;
+    }
+    _isScanning = true;
+    try {
+      if (!fs.existsSync(agentsPath)) return;
+      let agentDirs: string[] = [];
+      try {
+        agentDirs = fs.readdirSync(agentsPath).filter((d) => !d.startsWith("."));
+      } catch {
+        return;
+      }
+      // Process agents in bounded concurrent batches
+      for (let i = 0; i < agentDirs.length; i += AGENT_CONCURRENCY) {
+        const batch = agentDirs.slice(i, i + AGENT_CONCURRENCY);
+        await Promise.allSettled(
+          batch.map((agentDir) => scanAgent(agentDir, agentsPath, inflight, db, ollama, config, logger))
+        );
+      }
+    } finally {
+      _isScanning = false;
     }
   };
 

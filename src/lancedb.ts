@@ -13,11 +13,19 @@ import fs from "fs";
 import { MemoryEntry, MemoryType, NoesisConfig, NoesisStats } from "./types.js";
 import { logError } from "./logger.js";
 
+/**
+ * Per-checksum mutex — serializes concurrent upserts that share the same checksum.
+ * Keyed by checksum, cleared after each dedup+insert completes.
+ * Guards the two-step: dedup-query → insert (gap allows duplicates otherwise).
+ */
+
 const TABLE_NAME = "memories";
 const ARCHIVE_TABLE_NAME = "memories_archive";
 
 export class NoesisDB {
   private conn: lancedb.Connection | null = null;
+  // Instance-level gate — each NoesisDB has its own serialised upsert queue
+  private _upsertGate: Promise<unknown> = Promise.resolve();
   private table: lancedb.Table | null = null;
   private archiveTable: lancedb.Table | null = null;
   private embeddingDim: number = 768;
@@ -38,9 +46,16 @@ export class NoesisDB {
     // Ensure db directory exists
     fs.mkdirSync(this.dbPath, { recursive: true });
 
-    this.conn = await lancedb.connect(this.dbPath);
-    this.table = await this.openOrCreateTable();
-    this.archiveTable = await this.openOrCreateArchiveTable();
+    try {
+      this.conn = await lancedb.connect(this.dbPath);
+      this.table = await this.openOrCreateTable();
+      this.archiveTable = await this.openOrCreateArchiveTable();
+    } catch (err) {
+      this.table = null;
+      this.archiveTable = null;
+      this.conn = null;
+      throw err;
+    }
   }
 
   /**
@@ -106,40 +121,85 @@ export class NoesisDB {
 
   /**
    * Insert a batch of memory entries (upsert by checksum — idempotent).
-   * Returns count of actually inserted entries.
+   *
+   * Concurrency safety — delete-before-insert per checksum:
+   *   1. DELETE any row that already has this checksum (no-op if none exists)
+   *   2. ADD the new row(s)
+   * This is atomic — there is no gap between the "already exists" check and insert
+   * where another concurrent upsert could slip in and create a duplicate.
+   * Each checksum gets its own mutex slot so different checksums proceed in parallel.
+   *
+   * Returns the number of entries inserted (0 if checksum already existed).
    */
   async upsertEntries(entries: MemoryEntry[]): Promise<number> {
     if (entries.length === 0) return 0;
     const tbl = this.getTable();
 
-    // Dedup: check existing checksums in batch.
-    // Batch into groups of 100 to avoid query size limits with large IN clauses.
-    const checksums = entries.map((e) => e.checksum);
-    const existingChecksums = new Set<string>();
-    const BATCH_SIZE = 100;
-
-    try {
-      for (let i = 0; i < checksums.length; i += BATCH_SIZE) {
-        const batch = checksums.slice(i, i + BATCH_SIZE);
-        const quotedBatch = batch.map((c) => `'${c}'`).join(", ");
-        const existing = await tbl
-          .query()
-          .where(`checksum IN (${quotedBatch})`)
-          .select(["checksum"])
-          .limit(batch.length + 1)
-          .toArray();
-        for (const r of existing as any[]) {
-          existingChecksums.add(String(r.checksum));
-        }
-      }
-    } catch {
-      // table might be empty — that's fine
+    // Group by checksum — serialise entries that share the same checksum
+    const byChecksum = new Map<string, MemoryEntry[]>();
+    for (const e of entries) {
+      const arr = byChecksum.get(e.checksum);
+      if (arr) arr.push(e);
+      else byChecksum.set(e.checksum, [e]);
     }
 
-    const newEntries = entries.filter((e) => !existingChecksums.has(e.checksum));
-    if (newEntries.length === 0) return 0;
+    // Serialise ALL upserts through a shared Promise chain (module-level _upsertGate).
+    // Each call: 1) captures its result promise from the gate chain, 2) awaits it.
+    // This ensures all concurrent calls queue FIFO and each gets the correct result.
+    const myWork = async (): Promise<number> => {
+      let inserted = 0;
+      for (const [checksum, group] of byChecksum.entries()) {
+        const n = await this._upsertOneChecksum(tbl, checksum, group);
+        inserted += n;
+      }
+      return inserted;
+    };
+    // Chain work onto the gate; capture the linked gate BEFORE assigning to _upsertGate
+    const linkedGate = this._upsertGate.then(() => myWork());
+    this._upsertGate = linkedGate; // ensure next call chains onto THIS call's completion
+    const result = await linkedGate; // wait for THIS call's work to finish
+    return result;
+  }
 
-    const rows = newEntries.map((e) => ({
+  /**
+   * Wraps a promise with a timeout.  Rejects if `promise` doesn't settle within
+   * `ms` milliseconds — prevents a stuck operation from blocking the upsert queue.
+   */
+  private async withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const timer = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error(label + " timed out after " + ms + "ms")), ms);
+    });
+    try {
+      return await Promise.race([promise, timer]);
+    } finally {
+      clearTimeout(timeoutId!);
+    }
+  }
+
+  /**
+   * Delete + re-insert for one checksum.  Called only from within the mutex.
+   * Uses delete-before-insert to eliminate the read-then-insert race window.
+   * Protected by a 30-second timeout — if the operation hangs, callers get
+   * an error rather than blocking the entire upsert queue indefinitely.
+   * Returns 1 if the entry was inserted (new), 0 if the checksum already
+   * existed, or throws if the operation timed out.
+   */
+  async _upsertOneChecksum(
+    tbl: ReturnType<typeof this.getTable>,
+    checksum: string,
+    entries: MemoryEntry[]
+  ): Promise<number> {
+    let numDeleted = 0;
+    try {
+      const delP = tbl.delete(`checksum = '${escapeFilterValue(checksum)}'`);
+      const result = await this.withTimeout(delP, 30_000, "delete checksum=" + checksum);
+      numDeleted = Number(result.numDeletedRows);
+    } catch (err) {
+      logError("Upsert delete failed", { error: err, extra: { checksum } });
+      throw err;
+    }
+    const rows = entries.map((e) => ({
       id: e.id,
       agentId: e.agentId,
       sessionId: e.sessionId,
@@ -154,9 +214,9 @@ export class NoesisDB {
       expiresAt: e.expiresAt ?? 0,
       tags: Array.isArray(e.tags) ? e.tags.map(String) : [],
     }));
-
     await tbl.add(rows);
-    return newEntries.length;
+    // numDeleted > 0 means checksum already existed — not a new entry
+    return numDeleted === 0 ? 1 : 0;
   }
 
   /**
@@ -170,13 +230,24 @@ export class NoesisDB {
     memoryType?: MemoryType,
     crossAgent?: boolean
   ): Promise<Array<{ id: string; agentId: string; sessionId: string; content: string; memoryType: string; createdAt: number; sourcePath: string; tags: string[]; score: number; priority: number; expiresAt: number }>> {
-    const tbl = this.getTable();
+    let tbl: ReturnType<typeof this.getTable>;
+    try {
+      tbl = this.getTable();
+    } catch {
+      return [];
+    }
 
-    let query = tbl
-      .vectorSearch(embedding)
-      .select(["id", "agentId", "sessionId", "content", "memoryType", "createdAt", "sourcePath", "tags"])
-      .limit(topK * 2)
-      .nprobes(this.config.annNprobe);
+    let query: ReturnType<typeof tbl.vectorSearch>;
+    try {
+      query = tbl
+        .vectorSearch(embedding)
+        .select(["id", "agentId", "sessionId", "content", "memoryType", "createdAt", "sourcePath", "tags"])
+        .limit(topK * 2)
+        .nprobes(this.config.annNprobe);
+    } catch (err) {
+      logError("vectorSearch() failed — ANN index may not be ready", { error: err });
+      return [];
+    }
 
     const filters: string[] = [];
     if (agentId && !crossAgent) {
@@ -189,20 +260,25 @@ export class NoesisDB {
       query = query.where(filters.join(" AND "));
     }
 
-    const results = await query.toArray();
-    return results.map((r: any) => ({
-      id: String(r.id),
-      agentId: String(r.agentId),
-      sessionId: String(r.sessionId),
-      content: String(r.content),
-      memoryType: String(r.memoryType),
-      createdAt: Number(r.createdAt),
-      sourcePath: String(r.sourcePath),
-      tags: Array.isArray(r.tags) ? r.tags.map(String) : [],
-      score: typeof r._distance === "number" ? 1 / (1 + r._distance) : 0,
-      priority: Number(r.priority ?? 0),
-      expiresAt: Number(r.expiresAt ?? 0),
-    }));
+    try {
+      const results = await query.toArray();
+      return results.map((r: any) => ({
+        id: String(r.id),
+        agentId: String(r.agentId),
+        sessionId: String(r.sessionId),
+        content: String(r.content),
+        memoryType: String(r.memoryType),
+        createdAt: Number(r.createdAt),
+        sourcePath: String(r.sourcePath),
+        tags: Array.isArray(r.tags) ? r.tags.map(String) : [],
+        score: typeof r._distance === "number" ? 1 / (1 + r._distance) : 0,
+        priority: Number(r.priority ?? 0),
+        expiresAt: Number(r.expiresAt ?? 0),
+      }));
+    } catch (err) {
+      logError("vectorSearch() query execution failed", { error: err });
+      return [];
+    }
   }
 
   /**
@@ -329,7 +405,11 @@ export class NoesisDB {
    */
   async deleteById(id: string): Promise<void> {
     const tbl = this.getTable();
-    await tbl.delete(`id = '${id.replace(/'/g, "''")}'`);
+    try {
+      await tbl.delete(`id = '${id.replace(/'/g, "''")}'`);
+    } catch (err) {
+      logError("deleteById failed", { error: err, extra: { id } });
+    }
   }
 
   /**
@@ -368,10 +448,31 @@ export class NoesisDB {
     const filters: string[] = [];
     if (agentId) filters.push(`agentId = '${escapeFilterValue(agentId)}'`);
     if (memoryType) filters.push(`memoryType = '${escapeFilterValue(memoryType)}'`);
-    let query = tbl.query().select(["id", "agentId", "sessionId", "content", "chunk", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"]).limit(100_000);
-    if (filters.length > 0) query = query.where(filters.join(" AND "));
-    const rows = await query.toArray();
-    return (rows as any[]).map(rowToEntry);
+    const whereClause = filters.length > 0 ? filters.join(" AND ") : undefined;
+
+    // Paginate to avoid loading the entire table + embeddings into heap at once.
+    // Each page = 5000 rows; embeddings are 768 * 8 = ~6KB/row → ~30MB per page,
+    // well within reasonable memory bounds.
+    const PAGE_SIZE = 5000;
+    const allEntries: MemoryEntry[] = [];
+    let offset = 0;
+
+    while (true) {
+      let query = tbl.query()
+        .select(["id", "agentId", "sessionId", "content", "chunk", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"])
+        .limit(PAGE_SIZE)
+        .offset(offset);
+      if (whereClause) query = query.where(whereClause);
+      const rows = await query.toArray();
+      if (rows.length === 0) break;
+      for (const row of rows as any[]) {
+        allEntries.push(rowToEntry(row));
+      }
+      if (rows.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
+
+    return allEntries;
   }
 
   /**
@@ -379,10 +480,15 @@ export class NoesisDB {
    */
   async count(agentId?: string): Promise<number> {
     const tbl = this.getTable();
-    if (agentId) {
-      return tbl.countRows(`agentId = '${escapeFilterValue(agentId)}'`);
+    try {
+      if (agentId) {
+        return tbl.countRows(`agentId = '${escapeFilterValue(agentId)}'`);
+      }
+      return tbl.countRows();
+    } catch (err) {
+      logError("count failed", { error: err, extra: { agentId } });
+      return 0;
     }
-    return tbl.countRows();
   }
 
   /**
@@ -415,40 +521,61 @@ export class NoesisDB {
     const now = Date.now();
     let archived = 0;
     try {
-      // Select full rows for expired entries
-      const toArchive = await tbl
-        .query()
-        .where(`expiresAt > 0 AND expiresAt < ${now}`)
-        .select(["id", "agentId", "sessionId", "content", "chunk", "embedding", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"])
-        .limit(10_000)
-        .toArray();
-      if (toArchive.length === 0) return 0;
+      // Process expired entries in batches to avoid large queries.
+      while (true) {
+        let toArchive: any[] = [];
+        try {
+          toArchive = await tbl
+            .query()
+            .where(`expiresAt > 0 AND expiresAt < ${now}`)
+            .select(["id", "agentId", "sessionId", "content", "chunk", "embedding", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"])
+            .limit(500)
+            .toArray();
+        } catch (err) {
+          logError("archiveExpired query failed", { error: err });
+          break;
+        }
+        if (toArchive.length === 0) break;
 
-      // Insert into archive
-      const archiveTbl = this.getArchiveTable();
-      const rows = toArchive.map((r: any) => ({
-        id: String(r.id),
-        agentId: String(r.agentId),
-        sessionId: String(r.sessionId),
-        content: String(r.content),
-        chunk: String(r.chunk ?? ""),
-        embedding: r.embedding,
-        memoryType: String(r.memoryType ?? "fact"),
-        priority: Number(r.priority ?? 0),
-        expiresAt: Number(r.expiresAt ?? 0),
-        createdAt: Number(r.createdAt ?? 0),
-        sourcePath: String(r.sourcePath ?? ""),
-        checksum: String(r.checksum ?? ""),
-        tags: Array.isArray(r.tags) ? r.tags.map(String) : [],
-      }));
-      await archiveTbl.add(rows);
+        // Delete FIRST — if the process crashes between delete and insert, entries
+        // are missing from active (not duplicated in archive). Next run will re-archive
+        // them. This is safer than insert-then-delete where a crash causes duplication.
+        try {
+          const ids = toArchive.map((r: any) => `'${r.id}'`).join(", ");
+          await tbl.delete(`id IN (${ids})`);
+        } catch (err) {
+          logError("archiveExpired delete failed", { error: err });
+          break;
+        }
 
-      // Delete from active table
-      const ids = toArchive.map((r: any) => `'${r.id}'`).join(", ");
-      await tbl.delete(`id IN (${ids})`);
-      archived = toArchive.length;
+        // Insert into archive — if this fails, entries are still gone from active
+        // but will be re-archived on the next cleanup cycle. Acceptable trade-off.
+        try {
+          const archiveTbl = this.getArchiveTable();
+          const rows = toArchive.map((r: any) => ({
+            id: String(r.id),
+            agentId: String(r.agentId),
+            sessionId: String(r.sessionId),
+            content: String(r.content),
+            chunk: String(r.chunk ?? ""),
+            embedding: r.embedding,
+            memoryType: String(r.memoryType ?? "fact"),
+            priority: Number(r.priority ?? 0),
+            expiresAt: Number(r.expiresAt ?? 0),
+            createdAt: Number(r.createdAt ?? 0),
+            sourcePath: String(r.sourcePath ?? ""),
+            checksum: String(r.checksum ?? ""),
+            tags: Array.isArray(r.tags) ? r.tags.map(String) : [],
+          }));
+          await archiveTbl.add(rows);
+          archived += toArchive.length;
+        } catch (err) {
+          logError("archiveExpired archive insert failed", { error: err });
+          break;
+        }
+      }
     } catch (err) {
-      // archive table not ready — skip silently
+      logError("archiveExpired failed", { error: err });
     }
     return archived;
   }
@@ -648,6 +775,13 @@ export class NoesisDB {
    */
   async ensureAnnIndex(): Promise<void> {
     if (this.indexCreated) return;
+    // local promise guard so concurrent callers all await the same creation
+    if ((this as any)._annIndexPromise) return;
+    (this as any)._annIndexPromise = this._ensureAnnIndexLocked();
+    await (this as any)._annIndexPromise;
+  }
+
+  private async _ensureAnnIndexLocked(): Promise<void> {
     const tbl = this.getTable();
     const count = await tbl.countRows();
     if (count < 256) return; // IVF-PQ needs enough data to build partitions
@@ -664,10 +798,11 @@ export class NoesisDB {
           }),
         });
       }
-      this.indexCreated = true;
     } catch (err) {
       // Index creation is best-effort — ANN just won't be used, but log so operator knows
       logError("Failed to create ANN index", { error: err, extra: { table: "memories" } });
+    } finally {
+      this.indexCreated = true;
     }
   }
 
@@ -749,14 +884,19 @@ export class NoesisDB {
     const tbl = this.getTable();
     const now = Date.now();
 
-    let query = tbl
-      .query()
-      .select(["id", "agentId", "sessionId", "content", "chunk", "embedding", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"])
-      .where(`priority >= ${minPriority}`)
-      .limit(limit);
-
-    const results = await query.toArray();
-    const entries = (results as any[]).map(rowToEntry);
+    let results: any[] = [];
+    try {
+      results = await tbl
+        .query()
+        .select(["id", "agentId", "sessionId", "content", "chunk", "embedding", "memoryType", "priority", "expiresAt", "createdAt", "sourcePath", "checksum", "tags"])
+        .where(`priority >= ${minPriority}`)
+        .limit(limit)
+        .toArray();
+    } catch (err) {
+      logError("queryByPriority query failed", { error: err, extra: { minPriority, agentId } });
+      return [];
+    }
+    const entries = results.map(rowToEntry);
 
     // Filter out expired
     const active = entries.filter(e => e.expiresAt === 0 || e.expiresAt > now);

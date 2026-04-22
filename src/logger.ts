@@ -1,43 +1,53 @@
 /**
- * Noesis — Dedicated error logger
+ * Noesis — Dedicated file logger
  *
- * Writes structured error logs to ~/.openclaw/noesis/error.log
- * Independent of OpenClaw's api.logger — errors are never lost
- * even if OpenClaw's log stream is broken.
+ * Writes all plugin logs to ~/.openclaw/noesis/noesis.log
+ * and errors to ~/.openclaw/noesis/error.log.
+ * Independent of OpenClaw's api.logger — no plugin output reaches the gateway log.
  */
 
 import fs from "fs";
 import path from "path";
 import os from "os";
 
+const DEFAULT_NOESIS_LOG_PATH = "~/.openclaw/noesis/noesis.log";
 const DEFAULT_ERROR_LOG_PATH = "~/.openclaw/noesis/error.log";
+const MAX_LOG_BYTES = 5 * 1024 * 1024;
 
-export interface ErrorLogEntry {
-  timestamp: string;
-  level: "error" | "warn" | "fatal";
-  message: string;
-  stack?: string;
-  context?: Record<string, unknown>;
-  tool?: string;
-  agentId?: string;
-  sessionId?: string;
-}
-
+let noesisLogPath: string = resolvePath(DEFAULT_NOESIS_LOG_PATH);
 let errorLogPath: string = resolvePath(DEFAULT_ERROR_LOG_PATH);
-let rotationWarningLogged = false;
+let noesisLogRotationLogged = false;
+let errorLogRotationLogged = false;
 
 /**
- * Configure the error log path (call before any logging).
+ * Configure both log paths (call before any logging).
  */
-export function configureErrorLog(logPath: string): void {
-  errorLogPath = resolvePath(logPath);
-  ensureLogDir();
+export function configureLogs(noesisPath: string, errorPath: string): void {
+  noesisLogPath = resolvePath(noesisPath);
+  errorLogPath = resolvePath(errorPath);
+  ensureLogDir(noesisLogPath);
+  ensureLogDir(errorLogPath);
+}
+
+/**
+ * Write an info/debug line to the noesis log file.
+ * Silently no-ops on write failures.
+ */
+export function logInfo(message: string): void {
+  try {
+    ensureLogDir(noesisLogPath);
+    const line = `${timestamp()} [INFO] ${message}\n`;
+    fs.appendFileSync(noesisLogPath, line, { encoding: "utf8" });
+    checkRotation(noesisLogPath, () => { noesisLogRotationLogged = true; });
+  } catch {
+    // Logging should never crash the plugin
+  }
 }
 
 /**
  * Write an error to the dedicated error log file.
  * Appends a single-line JSON entry per error.
- * Silently no-ops on write failures (don't crash over logging).
+ * Silently no-ops on write failures.
  */
 export function logError(
   message: string,
@@ -50,7 +60,7 @@ export function logError(
   }
 ): void {
   try {
-    ensureLogDir();
+    ensureLogDir(errorLogPath);
 
     const entry: ErrorLogEntry = {
       timestamp: new Date().toISOString(),
@@ -74,8 +84,7 @@ export function logError(
 
     const line = JSON.stringify(entry) + "\n";
     fs.appendFileSync(errorLogPath, line, { encoding: "utf8" });
-
-    checkRotation();
+    checkRotation(errorLogPath, () => { errorLogRotationLogged = true; });
   } catch {
     // Logging should never crash the plugin
   }
@@ -83,8 +92,6 @@ export function logError(
 
 /**
  * Serialize any rejection reason into a readable string.
- * Handles Error instances, strings, numbers, booleans, null, undefined,
- * and arbitrary objects (via JSON stringify fallback).
  */
 function serializeReason(reason: unknown): string {
   if (reason instanceof Error) return reason.message;
@@ -101,7 +108,6 @@ function serializeReason(reason: unknown): string {
 
 /**
  * Write a fatal error (unhandled rejection, uncaught exception).
- * Same as logError but level=fatal for filtering.
  */
 export function logFatal(
   message: string,
@@ -109,7 +115,7 @@ export function logFatal(
   context?: Record<string, unknown>
 ): void {
   try {
-    ensureLogDir();
+    ensureLogDir(errorLogPath);
 
     const entry: ErrorLogEntry = {
       timestamp: new Date().toISOString(),
@@ -123,39 +129,32 @@ export function logFatal(
     if (error instanceof Error) {
       entry.stack = error.stack ?? error.message;
     } else {
-      // Non-Error value: use serialized reason as message
       entry.message = serializeReason(error ?? message);
     }
 
     const line = JSON.stringify(entry) + "\n";
     fs.appendFileSync(errorLogPath, line, { encoding: "utf8" });
-
-    checkRotation();
+    checkRotation(errorLogPath, () => { errorLogRotationLogged = true; });
   } catch {
     // Logging should never crash the plugin
   }
 }
 
 /**
- * Install global unhandled rejection and uncaught exception handlers
- * that write to the noesis error log before propagating.
- * Call once during plugin init.
+ * Install global unhandled rejection and uncaught exception handlers.
  */
 export function installGlobalErrorHandlers(): void {
-  process.on("unhandledRejection", (reason: unknown, promise: Promise<unknown>) => {
-    const serialized = serializeReason(reason);
-    logFatal("Unhandled Promise Rejection", reason, { context: "unhandledRejection", serialized });
+  process.on("unhandledRejection", (reason: unknown) => {
+    logFatal("Unhandled Promise Rejection", reason, { context: "unhandledRejection" });
   });
 
   process.on("uncaughtException", (error: Error) => {
     logFatal("Uncaught Exception", error, { context: "uncaughtException" });
-    // Don't exit — let OpenClaw manage shutdown
   });
 }
 
 /**
- * Wrap an async function so any thrown error is logged to error.log
- * before propagating. Use for tool execute() callbacks.
+ * Wrap an async function so any thrown error is logged before propagating.
  */
 export function withErrorLog<T extends (...args: any[]) => Promise<any>>(
   fn: T,
@@ -174,33 +173,49 @@ export function withErrorLog<T extends (...args: any[]) => Promise<any>>(
 
 // ─── internals ────────────────────────────────────────────────────────────────
 
+function timestamp(): string {
+  return new Date().toISOString();
+}
+
 function resolvePath(p: string): string {
   return p.replace(/^~/, os.homedir());
 }
 
-function ensureLogDir(): void {
-  const dir = path.dirname(errorLogPath);
+function ensureLogDir(logPath: string): void {
+  const dir = path.dirname(logPath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
 }
 
-/** Truncate error log if it grows beyond 5 MB. */
-const MAX_LOG_BYTES = 5 * 1024 * 1024;
-
-function checkRotation(): void {
-  if (rotationWarningLogged) return;
+/**
+ * Truncate a log file to the last 1000 lines if it exceeds MAX_LOG_BYTES.
+ * Calls onRotation only once per process lifetime (prevents spam on large logs).
+ */
+function checkRotation(logPath: string, onRotated: () => void): void {
   try {
-    const stat = fs.statSync(errorLogPath);
+    const stat = fs.statSync(logPath);
     if (stat.size > MAX_LOG_BYTES) {
-      // Truncate to last 1000 lines
-      const content = fs.readFileSync(errorLogPath, "utf8");
+      const content = fs.readFileSync(logPath, "utf8");
       const lines = content.split("\n").filter(Boolean);
       const trimmed = lines.slice(-1000).join("\n") + "\n";
-      fs.writeFileSync(errorLogPath, trimmed, { encoding: "utf8" });
-      rotationWarningLogged = true;
+      fs.writeFileSync(logPath, trimmed, { encoding: "utf8" });
+      onRotated();
     }
   } catch {
     // Ignore rotation errors
   }
+}
+
+// ─── types ────────────────────────────────────────────────────────────────────
+
+export interface ErrorLogEntry {
+  timestamp: string;
+  level: "error" | "warn" | "fatal";
+  message: string;
+  stack?: string;
+  context?: Record<string, unknown>;
+  tool?: string;
+  agentId?: string;
+  sessionId?: string;
 }
